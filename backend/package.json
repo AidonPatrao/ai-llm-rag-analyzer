@@ -2,7 +2,7 @@
   "name": "backend",
   "type": "module",
   "scripts": {
-    "dev": "node --watch src/server.js"
+    "dev": "node src/server.js"
   },
   "dependencies": {
     "express": "^4.19.2"

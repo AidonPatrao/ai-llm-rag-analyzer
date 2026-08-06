@@ -2,15 +2,11 @@ name: Backend CI
 
 on:
   push:
-    paths:
-      - "backend/**"
   pull_request:
-    paths:
-      - "backend/**"
 
 jobs:
-  build:
-    name: Build Backend
+  backend:
+    name: Backend Validation
     runs-on: ubuntu-latest
 
     defaults:
@@ -18,8 +14,10 @@ jobs:
         working-directory: backend
 
     steps:
-      - name: Checkout Repository
+
+      - name: Checkout Code
         uses: actions/checkout@v4
+
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -28,9 +26,19 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
+
       - name: Install Dependencies
         run: npm ci
 
-      - name: Verify Backend Starts
+
+      - name: Check JavaScript Syntax
+        run: node --check src/server.js
+
+
+      - name: Start Backend and Test API
         run: |
-          timeout 10s npm run dev 
+          node src/server.js &
+          SERVER_PID=$!
+          sleep 5
+          curl --fail http://localhost:3000/api/health
+          kill $SERVER_PID
