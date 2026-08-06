@@ -4,7 +4,7 @@ function App() {
       <div className="max-w-3xl text-center">
         <h1 className="text-5xl font-bold mb-6">
           DevOps Autopilot AI
-        
+        </h1>
 
         <p className="text-xl text-slate-300 mb-8">
           Your AI-powered DevOps assistant for monitoring deployments,
@@ -16,7 +16,7 @@ function App() {
         </button>
       </div>
     </div>
-  );gvgvygvghvghvgj
+  );
 }
 
 export default App;
