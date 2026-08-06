@@ -33,4 +33,4 @@ jobs:
 
       - name: Verify Backend Starts
         run: |
-          timeout 10s npm run dev || true
+          timeout 10s npm run dev 
