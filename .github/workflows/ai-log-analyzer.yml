@@ -1,0 +1,51 @@
+name: AI Log Analyzer CI
+
+on:
+  push:
+    branches: [ "feat/full-stack" ]
+  pull_request:
+    branches: [ "feat/full-stack" ]
+
+jobs:
+  validate-and-analyze:
+    name: Full-Stack CI with AI Log Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install & Test Backend
+        run: |
+          cd backend
+          npm ci
+          node --check src/server.js
+
+      - name: Install & Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Run AI Diagnostic on CI Failure
+        if: failure()
+        run: |
+          echo "### 🤖 AI Log Analyzer Diagnostic Report" >> $GITHUB_STEP_SUMMARY
+          echo "CI Build step encountered a failure. Running AI diagnostic analysis..." >> $GITHUB_STEP_SUMMARY
+          
+          # Sample payload sent to backend /analyze endpoint
+          cd backend
+          node src/server.js &
+          PID=$!
+          sleep 3
+          
+          ANALYSIS_RESULT=$(curl -s -X POST http://localhost:3000/analyze -H "Content-Type: application/json" -d '{"log": "ERR_MODULE_NOT_FOUND: Cannot find package in node_modules"}')
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$ANALYSIS_RESULT" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kill $PID
