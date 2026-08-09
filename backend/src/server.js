@@ -278,33 +278,62 @@ function preprocessLog(rawLogText) {
     };
 }
 
-// Extract failing source file path from log trace or heuristics
+// Extract failing source file path AND line number from log stack trace
 function extractSourceFilePath(logText) {
-    if (!logText) return null;
+    if (!logText) return { filePath: null, lineNumber: null, colNumber: null };
 
-    const locationMatch = logText.match(/(?:at\s+.*?\()?([a-zA-Z0-9_./\\-]+\.(?:js|ts|jsx|tsx|py|json|yml|yaml)):(\d+):(\d+)/i);
-    const moduleFileMatch = logText.match(/Require stack:[\s\S]*?[-\s]*(?:.*[\\/])?([a-zA-Z0-9_-]+\.(?:js|ts|jsx|tsx|py|json|yml|yaml))/i);
-    const fileMentionMatch = logText.match(/([a-zA-Z0-9_/-]+\/(?:demo-config\.js|server\.js|ci\.yml|app\.js|package\.json|index\.js))/i);
+    // Pattern 1: Standard Node.js stack trace  "at funcName (path/file.js:45:10)"
+    const stackMatch = logText.match(
+        /at\s+(?:[\w.<>\[\]]+\s+)?\(?([a-zA-Z0-9_./@\\-]+\.(?:js|ts|jsx|tsx|py|yml|yaml|json)):(\d+):(\d+)\)?/i
+    );
 
-    let filePath = null;
-    if (locationMatch) {
-        filePath = locationMatch[1].replace(/\\/g, "/");
-        if (filePath.includes("/")) filePath = filePath.split("/").pop();
-    } else if (moduleFileMatch) {
-        filePath = moduleFileMatch[1];
-    } else if (fileMentionMatch) {
-        filePath = fileMentionMatch[1];
+    // Pattern 2: Bare file reference "path/file.js:45"
+    const bareMatch = logText.match(
+        /([a-zA-Z0-9_./@\\-]+\.(?:js|ts|jsx|tsx|py|yml|yaml|json)):(\d+)(?::(\d+))?/i
+    );
+
+    // Pattern 3: Require stack "  /home/runner/.../file.js"
+    const requireMatch = logText.match(
+        /Require stack:[\s\S]*?[-\s]+([^\s]+\.(?:js|ts|jsx|tsx|py|yml|yaml|json))/i
+    );
+
+    // Pattern 4: Explicit file mention for known project files
+    const mentionMatch = logText.match(
+        /([a-zA-Z0-9_/-]+\/(?:demo-config\.js|server\.js|ci\.yml|app\.js|package\.json|index\.js|workflow\.yml))/i
+    );
+
+    let filePath = null, lineNumber = null, colNumber = null;
+
+    if (stackMatch) {
+        filePath = stackMatch[1].replace(/\\/g, "/");
+        lineNumber = parseInt(stackMatch[2], 10);
+        colNumber = parseInt(stackMatch[3], 10);
+    } else if (bareMatch) {
+        filePath = bareMatch[1].replace(/\\/g, "/");
+        lineNumber = parseInt(bareMatch[2], 10);
+        colNumber = bareMatch[3] ? parseInt(bareMatch[3], 10) : null;
+    } else if (requireMatch) {
+        filePath = requireMatch[1].replace(/\\/g, "/");
+    } else if (mentionMatch) {
+        filePath = mentionMatch[1];
     }
 
-    if (!filePath && (logText.includes("health-check") || logText.includes("timeout") || logText.includes("5ms"))) {
+    // Strip absolute runner paths like /home/runner/work/repo/repo/ leaving relative path
+    if (filePath) {
+        filePath = filePath.replace(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "");
+        filePath = filePath.replace(/^.*node_modules\//, "node_modules/");
+    }
+
+    // Heuristic for health-check timeout demo
+    if (!filePath && (logText.includes("health-check") || logText.includes("5ms") || logText.includes("timeout"))) {
         filePath = "backend/demo-config.js";
     }
 
-    return filePath;
+    return { filePath, lineNumber, colNumber };
 }
 
-// Fetch source file content from GitHub API
-async function fetchSourceCodeFromGitHub(filePath, req) {
+// Fetch source file from GitHub and return full content + annotated snippet around failing line
+async function fetchSourceCodeFromGitHub(filePath, req, lineNumber = null) {
     try {
         const { owner, repo, pat } = getRepoConfig(req);
         const headers = { "Accept": "application/vnd.github+json", "User-Agent": "DevOps-AI-Log-Analyzer" };
@@ -312,11 +341,34 @@ async function fetchSourceCodeFromGitHub(filePath, req) {
 
         const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
         const res = await axios.get(url, { headers });
-        if (res.data && res.data.content) {
-            return Buffer.from(res.data.content, "base64").toString("utf-8");
+        if (!res.data?.content) return null;
+
+        const fullContent = Buffer.from(res.data.content, "base64").toString("utf-8");
+        const allLines = fullContent.split("\n");
+
+        let annotatedSnippet = "";
+        if (lineNumber && lineNumber > 0 && lineNumber <= allLines.length) {
+            // Show ±15 lines around the failing line, with the exact line marked
+            const start = Math.max(0, lineNumber - 16);
+            const end = Math.min(allLines.length - 1, lineNumber + 14);
+            const snippet = allLines.slice(start, end + 1).map((line, idx) => {
+                const actualLine = start + idx + 1;
+                const marker = actualLine === lineNumber ? " >>>" : "    ";
+                return `${String(actualLine).padStart(4)}${marker} ${line}`;
+            }).join("\n");
+            annotatedSnippet = `FAILING LINE: ${lineNumber}\nSNIPPET (>>> marks the failing line):\n${snippet}`;
+        } else {
+            // No line number — show first 60 lines
+            annotatedSnippet = allLines.slice(0, 60).map((l, i) =>
+                `${String(i + 1).padStart(4)}     ${l}`
+            ).join("\n");
         }
-    } catch (e) {}
-    return null;
+
+        return { content: fullContent, annotatedSnippet };
+    } catch (e) {
+        console.warn("Could not fetch source file from GitHub:", e.message);
+        return null;
+    }
 }
 
 // --- GitHub REST API Helper ---
@@ -399,14 +451,24 @@ async function autoAnalyzeRun(runId, req) {
         const logContent = preprocessed.cleanText || fullRawLog.slice(0, 3500);
         const ragContext = retrieveRAGContext(logContent);
 
-        const sourceFilePath = extractSourceFilePath(logContent);
-        let sourceContext = "No application source file was identified.";
+        const { filePath: sourceFilePath, lineNumber, colNumber } = extractSourceFilePath(logContent);
+        let sourceContext = "No application source file was identified in the stack trace.";
+        let annotatedCode = "";
+
         if (sourceFilePath) {
-            const rawSource = await fetchSourceCodeFromGitHub(sourceFilePath, req);
-            if (rawSource) {
-                sourceContext = `FILE: ${sourceFilePath}\nSOURCE CODE:\n${rawSource.slice(0, 2500)}`;
+            console.log(`📄 Reading source file: ${sourceFilePath}${lineNumber ? ` (line ${lineNumber})` : ""}`);
+            const fetchResult = await fetchSourceCodeFromGitHub(sourceFilePath, req, lineNumber);
+            if (fetchResult) {
+                annotatedCode = fetchResult.annotatedSnippet;
+                sourceContext = [
+                    `FILE: ${sourceFilePath}`,
+                    lineNumber ? `FAILING LINE: ${lineNumber}${colNumber ? `:${colNumber}` : ""}` : "",
+                    "",
+                    annotatedCode
+                ].filter(Boolean).join("\n");
+                console.log(`✅ Source file read successfully: ${sourceFilePath} (${fetchResult.content.split("\n").length} lines)`);
             } else {
-                sourceContext = `FILE: ${sourceFilePath}\nSOURCE CONTEXT: identified from build trace.`;
+                sourceContext = `FILE: ${sourceFilePath}${lineNumber ? ` (line ${lineNumber})` : ""}\nCould not fetch file — check GitHub PAT permissions.`;
             }
         }
 
@@ -414,36 +476,42 @@ async function autoAnalyzeRun(runId, req) {
         let aiResult = null;
         console.log(`🤖 Calling Ollama Granite (${PRIMARY_MODEL}) for failed run #${runIdStr}...`);
         try {
-            const systemPrompt = `You are IBM Granite AI DevOps Log Analyzer & Incident Remediation Assistant.
-DevOps Knowledge Base:
+            const systemPrompt = `You are IBM Granite, an expert AI DevOps engineer and code reviewer.
+
+DevOps Knowledge Base (RAG context):
 ${ragContext}
 
-INSTRUCTIONS:
-- Analyze ONLY what is in the actual logs below. Do not invent errors.
-- Always give a concrete, actionable recommended_fix for the actual failure.
-- Output ONLY a valid raw JSON object (no markdown, no backticks).
+Your task: Analyze the CI/CD failure log and the ACTUAL SOURCE CODE below, then produce a diagnosis and fix.
 
-Required JSON keys:
+RULES:
+- Read the source code carefully. The exact failing line is marked with >>> in the snippet.
+- Your recommended_fix MUST reference the actual code — quote the broken line and show what it should be changed to.
+- Write recommended_fix and explanation in clear, natural language that a developer can act on immediately.
+- Do NOT invent errors. Only diagnose what is visible in the log and source code.
+- Output ONLY a valid raw JSON object. No markdown, no backticks, no extra text.
+
+Required JSON:
 {
   "status": "failed",
-  "error_type": "<short error category>",
+  "error_type": "<short category e.g. Health Check Timeout / Module Not Found / Syntax Error>",
   "severity": "High|Medium|Low",
-  "failure_summary": "<1-2 sentence summary of what failed>",
-  "root_cause": "<technical root cause from the logs>",
-  "evidence": "<exact log lines showing the failure>",
-  "affected_file": "<file path or N/A>",
-  "source_context": "<relevant code snippet if available>",
-  "explanation": "<step-by-step chain of events>",
-  "recommended_fix": "<concrete fix with specific file names and values>",
-  "why_fix_works": "<why this resolves the root cause>",
+  "failure_summary": "<1-2 clear sentences: what failed and where>",
+  "root_cause": "<technical explanation citing the actual code or config value that caused the failure>",
+  "evidence": "<exact lines from the build log that show the error>",
+  "affected_file": "<file path from stack trace e.g. backend/demo-config.js>",
+  "source_context": "<the specific lines of code around the failure, quoted from the snippet below>",
+  "explanation": "<natural language step-by-step: what the code does, why this specific line or value caused the failure>",
+  "recommended_fix": "<natural language fix: quote the broken line, show exactly what to change it to, and explain why>",
+  "why_fix_works": "<explain in plain English why changing that specific value/line resolves the root cause>",
   "confidence": "High|Medium|Low"
 }
 
-WORKFLOW FAILURE LOG:
-${logContent.slice(0, 4000)}
+=== WORKFLOW FAILURE LOG ===
+${logContent.slice(0, 3000)}
 
-SOURCE CODE CONTEXT:
-${sourceContext}`;
+=== SOURCE FILE WITH FAILING LINE ANNOTATED ===
+${sourceContext}
+`;
 
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 45000);
