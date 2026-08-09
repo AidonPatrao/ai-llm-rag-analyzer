@@ -389,12 +389,18 @@ async function fetchGitHubAPI(endpoint, req) {
 }
 
 // Core Unified Workflow Analysis Engine
-async function autoAnalyzeRun(runId, req) {
+async function autoAnalyzeRun(runId, req, force = false) {
     const runIdStr = String(runId);
 
-    // Duplicate Analysis Prevention
-    const existing = await getExistingAnalysis(runIdStr);
-    if (existing) return existing;
+    // Duplicate Analysis Prevention — skip if force=true
+    if (!force) {
+        const existing = await getExistingAnalysis(runIdStr);
+        if (existing) return existing;
+    } else {
+        // Clear stale cache entry so fresh analysis is stored
+        runAnalysisCache.delete(runIdStr);
+        console.log(`🔄 Force re-analysis for run #${runIdStr} — cache cleared`);
+    }
 
     const { owner, repo, pat } = getRepoConfig(req);
 
@@ -443,7 +449,7 @@ async function autoAnalyzeRun(runId, req) {
         let fullRawLog = "";
         zipEntries.forEach(entry => {
             if (!entry.isDirectory && entry.entryName.endsWith(".txt")) {
-                fullRawLog += `\n--- [LOG FILE: ${entry.entryName}] ---\n` + entry.readAsText("utf-8");
+                fullRawLog += `\n--- [LOG FILE: ${entry.entryName}] ---\n` + entry.getData().toString("utf-8");
             }
         });
 
@@ -715,26 +721,21 @@ app.get("/devops-summary", async (req, res) => {
 app.get("/analyze/:id", async (req, res) => {
     try {
         const runId = req.params.id;
-        const aiAnalysis = await autoAnalyzeRun(runId, req);
+        const force = req.query.force === "true";
+        const aiAnalysis = await autoAnalyzeRun(runId, req, force);
 
-        // Format dynamic Granite LLM output string matching Picture 4
-        const graniteText = typeof aiAnalysis.explanation === "string" && aiAnalysis.explanation.includes("Based on the provided")
-            ? aiAnalysis.explanation
-            : `Based on the provided workflow logs and application source code, here are the findings:
-
-1. Exact root cause: ${aiAnalysis.root_cause || aiAnalysis.failure_summary}
-2. Severity: ${aiAnalysis.severity || "Medium"}
-3. Confidence: ${aiAnalysis.confidence || "Low"}
-4. What the application was trying to do: ${aiAnalysis.failure_summary || "The specific details are not provided in the logs and source code alone. However, based on typical CI/CD workflows, it is likely that the application intended to handle data validation or conversion between different formats before deploying."}
-5. Why it failed: ${aiAnalysis.explanation || aiAnalysis.root_cause}
-6. Possible causes:
-   - DeprecationWarning in \`punycode\` module may be causing issues in deployment.
-   - Incorrect Node.js version detected by CI/CD pipeline (Node 24 by default).
-7. Recommended fix:
-   - Update the application to use a compatible Node.js version, such as Node 20 or later.
-   - Review and address any deprecated warnings in the \`punycode\` module.
-
-In summary, while specific details about the application's intended behavior are not available, it is likely an issue related to deprecation warnings when deploying with a Node.js version less than 20. Updating the environment variables and dependencies should help resolve this CI/CD failure scenario.`;
+        // Build clean natural language output from Granite fields
+        const graniteText = [
+            aiAnalysis.failure_summary,
+            "",
+            aiAnalysis.root_cause ? `Root Cause: ${aiAnalysis.root_cause}` : "",
+            aiAnalysis.evidence ? `Evidence: ${aiAnalysis.evidence}` : "",
+            "",
+            aiAnalysis.explanation ? `Explanation: ${aiAnalysis.explanation}` : "",
+            "",
+            aiAnalysis.recommended_fix ? `Recommended Fix: ${aiAnalysis.recommended_fix}` : "",
+            aiAnalysis.why_fix_works ? `Why This Works: ${aiAnalysis.why_fix_works}` : ""
+        ].filter(Boolean).join("\n");
 
         res.json({
             runId: runId,
@@ -928,7 +929,7 @@ app.get("/logs/:id", async (req, res) => {
         let fullRawLog = "";
         zipEntries.forEach(entry => {
             if (!entry.isDirectory && entry.entryName.endsWith(".txt")) {
-                fullRawLog += `\n--- [LOG FILE: ${entry.entryName}] ---\n` + entry.readAsText("utf-8");
+                fullRawLog += `\n--- [LOG FILE: ${entry.entryName}] ---\n` + entry.getData().toString("utf-8");
             }
         });
 
@@ -1126,7 +1127,16 @@ ${sourceContext}
 app.post("/analyze", upload.single("file"), handleLogAnalysis);
 app.post("/api/analyze", upload.single("file"), handleLogAnalysis);
 
+// Clear cached analysis for a specific run (forces fresh Granite re-analysis)
+app.delete("/cache/:id", (req, res) => {
+    const runId = String(req.params.id);
+    const wasInCache = runAnalysisCache.has(runId);
+    runAnalysisCache.delete(runId);
+    res.json({ success: true, runId, cleared: wasInCache, message: `Cache cleared for run #${runId}. Next analysis call will use Granite LLM.` });
+});
+
 app.listen(PORT, () => {
+
     console.log(`🚀 DevOps AI Assistant Backend running on http://localhost:${PORT}`);
     console.log(`🤖 Configured Granite Model: ${PRIMARY_MODEL} via ${OLLAMA_URL}`);
     console.log(`🐙 Default GitHub Repo Target: ${GITHUB_OWNER}/${GITHUB_REPO}`);
