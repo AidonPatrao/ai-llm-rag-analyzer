@@ -27,7 +27,8 @@ import {
     ChevronDown,
     ChevronUp,
     LogOut,
-    Github
+    Github,
+    Code2
 } from "lucide-react";
 import api from "../services/api";
 import { supabase } from "../services/supabase";
@@ -343,7 +344,7 @@ function Dashboard() {
                         className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-base shadow-xl shadow-purple-950/60 flex items-center justify-center gap-3 transition-all hover:scale-[1.02] active:scale-98 mb-4"
                     >
                         <Github className="w-5 h-5 fill-current" />
-                        <span>Sign in with GitHub</span>
+                        <span>Continue with GitHub</span>
                     </button>
 
                     {/* Manual PAT Input Option */}
@@ -442,7 +443,7 @@ function Dashboard() {
                                 title="Click to log out and open Sign In screen"
                             >
                                 <LogOut className="w-4 h-4" />
-                                <span>Log Out / Sign In</span>
+                                <span>Sign Out</span>
                             </button>
                         </div>
                     </div>
@@ -637,16 +638,35 @@ function Dashboard() {
                                                     <div className="p-4 bg-slate-900/60 border-t border-slate-800/80 space-y-4 animate-in fade-in duration-200">
                                                         {ai ? (
                                                             <>
-                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                                                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                                                                         <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Error Type</p>
                                                                         <p className="text-xs font-bold text-purple-300">{ai.error_type || "Build Trace Summary"}</p>
+                                                                    </div>
+                                                                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                                                                        <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Affected File</p>
+                                                                        <p className="text-xs font-mono text-indigo-300 flex items-center gap-1 truncate">
+                                                                            <Code2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                                                            <span className="truncate">{ai.affected_file || "N/A"}</span>
+                                                                        </p>
                                                                     </div>
                                                                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                                                                         <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Root Cause</p>
                                                                         <p className="text-xs font-mono text-slate-300 truncate">{ai.root_cause}</p>
                                                                     </div>
                                                                 </div>
+
+                                                                {/* Source Code Context snippet if available */}
+                                                                {ai.source_context && ai.source_context !== "No application source file was identified." && (
+                                                                    <div>
+                                                                        <p className="text-[10px] font-mono text-indigo-400 uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                                            <Code2 className="w-3.5 h-3.5" /> Source Code Context Extracted
+                                                                        </p>
+                                                                        <div className="bg-slate-950 border border-indigo-500/20 rounded-lg p-3 text-xs font-mono text-slate-300 max-h-36 overflow-y-auto whitespace-pre-wrap">
+                                                                            {ai.source_context}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
 
                                                                 <div>
                                                                     <div className="flex items-center justify-between mb-1.5">
@@ -860,6 +880,7 @@ function Dashboard() {
                                             <th className="p-3">Repo</th>
                                             <th className="p-3">Error Type</th>
                                             <th className="p-3">Severity</th>
+                                            <th className="p-3">Affected File</th>
                                             <th className="p-3">Root Cause</th>
                                             <th className="p-3">Logged At</th>
                                         </tr>
@@ -871,6 +892,7 @@ function Dashboard() {
                                                 <td className="p-3 font-mono text-slate-400">{inc.repo || `${owner}/${repo}`}</td>
                                                 <td className="p-3 font-semibold">{inc.error_type}</td>
                                                 <td className="p-3">{getSeverityBadge(inc.severity)}</td>
+                                                <td className="p-3 font-mono text-indigo-300">{inc.affected_file || "N/A"}</td>
                                                 <td className="p-3 truncate max-w-xs">{inc.root_cause}</td>
                                                 <td className="p-3 text-slate-500 font-mono text-[11px]">{new Date(inc.created_at).toLocaleTimeString()}</td>
                                             </tr>

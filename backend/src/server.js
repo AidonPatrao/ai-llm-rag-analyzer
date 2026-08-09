@@ -55,7 +55,7 @@ if (DATABASE_URL) {
         dbPool.query(`
             CREATE TABLE IF NOT EXISTS incidents (
                 id SERIAL PRIMARY KEY,
-                run_id VARCHAR(100),
+                run_id VARCHAR(100) UNIQUE,
                 repo VARCHAR(200),
                 status VARCHAR(50),
                 error_type VARCHAR(150),
@@ -63,6 +63,8 @@ if (DATABASE_URL) {
                 root_cause TEXT,
                 explanation TEXT,
                 recommended_fix TEXT,
+                affected_file VARCHAR(255),
+                source_context TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `).then(() => {
@@ -88,6 +90,36 @@ function getRepoConfig(req) {
     return { owner, repo, pat };
 }
 
+// Duplicate Analysis Prevention: Check DB/Cache first before calling LLM
+async function getExistingAnalysis(runId) {
+    const runIdStr = String(runId);
+    if (runAnalysisCache.has(runIdStr)) {
+        return runAnalysisCache.get(runIdStr);
+    }
+
+    if (supabase) {
+        try {
+            const { data } = await supabase.from("incidents").select("*").eq("run_id", runIdStr).single();
+            if (data) {
+                runAnalysisCache.set(runIdStr, data);
+                return data;
+            }
+        } catch (e) {}
+    }
+
+    if (dbPool) {
+        try {
+            const res = await dbPool.query("SELECT * FROM incidents WHERE run_id = $1 LIMIT 1", [runIdStr]);
+            if (res.rows.length > 0) {
+                runAnalysisCache.set(runIdStr, res.rows[0]);
+                return res.rows[0];
+            }
+        } catch (e) {}
+    }
+
+    return null;
+}
+
 async function saveIncidentRecord(incident, repoName) {
     const record = {
         id: Date.now(),
@@ -99,6 +131,8 @@ async function saveIncidentRecord(incident, repoName) {
         root_cause: incident.root_cause || "No root cause identified",
         explanation: incident.explanation || incident.root_cause || "",
         recommended_fix: incident.recommended_fix || incident.suggestion || "Review logs",
+        affected_file: incident.affected_file || "N/A",
+        source_context: incident.source_context || "No source file context available.",
         created_at: new Date().toISOString()
     };
 
@@ -107,16 +141,19 @@ async function saveIncidentRecord(incident, repoName) {
 
     if (supabase) {
         try {
-            await supabase.from("incidents").insert([record]);
+            await supabase.from("incidents").upsert([record], { onConflict: "run_id" });
         } catch (e) {}
     }
 
     if (dbPool) {
         try {
             await dbPool.query(
-                `INSERT INTO incidents (run_id, repo, status, error_type, severity, root_cause, explanation, recommended_fix)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-                [record.run_id, record.repo, record.status, record.error_type, record.severity, record.root_cause, record.explanation, record.recommended_fix]
+                `INSERT INTO incidents (run_id, repo, status, error_type, severity, root_cause, explanation, recommended_fix, affected_file, source_context)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (run_id) DO UPDATE SET
+                 status = EXCLUDED.status, error_type = EXCLUDED.error_type, severity = EXCLUDED.severity,
+                 root_cause = EXCLUDED.root_cause, explanation = EXCLUDED.explanation, recommended_fix = EXCLUDED.recommended_fix`,
+                [record.run_id, record.repo, record.status, record.error_type, record.severity, record.root_cause, record.explanation, record.recommended_fix, record.affected_file, record.source_context]
             );
         } catch (err) {}
     }
@@ -230,6 +267,37 @@ function preprocessLog(rawLogText) {
     };
 }
 
+// Parent repo feature: Extract failing source file path from stack trace
+function extractSourceFilePath(logText) {
+    const locationMatch = logText.match(/(?:at\s+.*?\()?([a-zA-Z0-9_./\\-]+\.(?:js|ts|jsx|tsx|py)):(\d+):(\d+)/);
+    const moduleFileMatch = logText.match(/Require stack:[\s\S]*?[-\s]*(?:.*[\\/])?([a-zA-Z0-9_-]+\.(?:js|ts|jsx|tsx|py))/);
+
+    let filePath = null;
+    if (locationMatch) {
+        filePath = locationMatch[1].replace(/\\/g, "/");
+        if (filePath.includes("/")) filePath = filePath.split("/").pop();
+    } else if (moduleFileMatch) {
+        filePath = moduleFileMatch[1];
+    }
+    return filePath;
+}
+
+// Fetch source file content from GitHub API
+async function fetchSourceCodeFromGitHub(filePath, req) {
+    try {
+        const { owner, repo, pat } = getRepoConfig(req);
+        const headers = { "Accept": "application/vnd.github+json", "User-Agent": "DevOps-AI-Log-Analyzer" };
+        if (pat) headers["Authorization"] = `Bearer ${pat}`;
+
+        const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
+        const res = await axios.get(url, { headers });
+        if (res.data && res.data.content) {
+            return Buffer.from(res.data.content, "base64").toString("utf-8");
+        }
+    } catch (e) {}
+    return null;
+}
+
 // --- GitHub REST API Helper ---
 async function fetchGitHubAPI(endpoint, req) {
     const { owner, repo, pat } = getRepoConfig(req);
@@ -250,8 +318,11 @@ async function fetchGitHubAPI(endpoint, req) {
 // Automatic Log Fetching & LLM Analysis pipeline for a run ID
 async function autoAnalyzeRun(runId, req) {
     const runIdStr = String(runId);
-    if (runAnalysisCache.has(runIdStr)) {
-        return runAnalysisCache.get(runIdStr);
+    
+    // Check if already analyzed (Duplicate Analysis Prevention)
+    const existing = await getExistingAnalysis(runIdStr);
+    if (existing) {
+        return existing;
     }
 
     try {
@@ -275,23 +346,37 @@ async function autoAnalyzeRun(runId, req) {
         const logContent = preprocessed.cleanText || fullRawLog.slice(0, 3500);
         const ragContext = retrieveRAGContext(logContent);
 
+        // Extract application source file context from stack trace
+        const sourceFilePath = extractSourceFilePath(logContent);
+        let sourceContext = "No application source file was identified.";
+        if (sourceFilePath) {
+            const rawSource = await fetchSourceCodeFromGitHub(sourceFilePath, req);
+            if (rawSource) {
+                sourceContext = `FILE: ${sourceFilePath}\nSOURCE CODE:\n${rawSource.slice(0, 2000)}`;
+            }
+        }
+
         let aiResult = null;
         try {
             const systemPrompt = `You are IBM Granite AI DevOps Log Analyzer & Incident Remediation Assistant.
 You have access to the following DevOps Knowledge Base context:
 ${ragContext}
 
-Analyze the provided cleaned CI/CD build error log and output ONLY a raw JSON object (strictly no markdown formatting, no code block backticks).
+Analyze the provided cleaned CI/CD build error log and application source code.
+Output ONLY a raw JSON object (strictly no markdown formatting, no code block backticks).
 The JSON MUST contain these exact key names:
 - status: string ("failed", "warning", or "success")
 - error_type: string (e.g. "Dependency Error", "React JSX Syntax Error", "Build Process Timeout")
 - severity: string ("High", "Medium", or "Low")
 - root_cause: string (concise 1-sentence statement of why the build failed)
-- explanation: string (detailed breakdown of the failure stack trace)
+- explanation: string (detailed breakdown of the failure stack trace and source file context)
 - recommended_fix: string (step-by-step shell commands or code fixes to resolve the issue)
 
-Error Log Snippet:
-${logContent.slice(0, 4000)}
+WORKFLOW LOG:
+${logContent.slice(0, 3500)}
+
+APPLICATION SOURCE FILE CONTEXT:
+${sourceContext}
 `;
 
             const controller = new AbortController();
@@ -331,12 +416,17 @@ ${logContent.slice(0, 4000)}
                 error_type: preprocessed.errorLineCount > 0 ? "Build Process Execution Error" : "Pipeline Build Log Warning",
                 severity: "Medium",
                 root_cause: preprocessed.snippets[0] ? preprocessed.snippets[0].slice(0, 250) : "Build workflow finished or encountered errors.",
-                explanation: `Analysis generated via RAG Knowledge Engine. Matches pattern: ${ragContext.slice(0, 150)}`,
+                explanation: `Analysis generated via RAG Knowledge Engine. Source File Context: ${sourceContext.slice(0, 100)}`,
                 recommended_fix: "Review stack trace snippets, check environment variables in .env, and re-run workflow."
             };
         }
 
-        const savedRecord = await saveIncidentRecord({ ...aiResult, run_id: runIdStr }, `${owner}/${repo}`);
+        const savedRecord = await saveIncidentRecord({
+            ...aiResult,
+            run_id: runIdStr,
+            affected_file: sourceFilePath || "N/A",
+            source_context: sourceContext
+        }, `${owner}/${repo}`);
         return savedRecord;
 
     } catch (err) {
@@ -347,12 +437,45 @@ ${logContent.slice(0, 4000)}
             severity: "Low",
             root_cause: "No critical errors found in build trace.",
             explanation: "All steps in pipeline executed smoothly.",
-            recommended_fix: "No action required."
+            recommended_fix: "No action required.",
+            affected_file: "N/A",
+            source_context: "Clean build execution."
         };
         runAnalysisCache.set(String(runId), fallback);
         return fallback;
     }
 }
+
+// --- Parent Repo Compatibility Endpoints ---
+app.get("/analyze/:id", async (req, res) => {
+    const aiAnalysis = await autoAnalyzeRun(req.params.id, req);
+    res.json({
+        runId: req.params.id,
+        affectedFile: aiAnalysis.affected_file || extractSourceFilePath(aiAnalysis.explanation || "") || "N/A",
+        sourceContextIncluded: true,
+        graniteAnalysis: aiAnalysis
+    });
+});
+
+app.get("/analyze-latest", async (req, res) => {
+    try {
+        const data = await fetchGitHubAPI("/actions/runs?status=completed&per_page=10", req);
+        const failedRun = (data.workflow_runs || []).find(r => r.conclusion === "failure");
+        if (!failedRun) {
+            return res.json({ message: "No failed workflow found" });
+        }
+        const aiAnalysis = await autoAnalyzeRun(failedRun.id, req);
+        res.json({
+            runId: failedRun.id,
+            workflow: failedRun.name,
+            branch: failedRun.head_branch,
+            result: failedRun.conclusion,
+            analysis: aiAnalysis
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to analyze latest workflow" });
+    }
+});
 
 // --- OAuth Direct Endpoints ---
 app.get("/api/auth/github", (req, res) => {
@@ -677,23 +800,37 @@ async function handleLogAnalysis(req, res) {
 
         const ragContext = retrieveRAGContext(logContent);
 
+        // Extract failing source file from stack trace
+        const sourceFilePath = extractSourceFilePath(logContent);
+        let sourceContext = "No application source file was identified.";
+        if (sourceFilePath) {
+            const rawSource = await fetchSourceCodeFromGitHub(sourceFilePath, req);
+            if (rawSource) {
+                sourceContext = `FILE: ${sourceFilePath}\nSOURCE CODE:\n${rawSource.slice(0, 2000)}`;
+            }
+        }
+
         let aiResult = null;
         try {
             const systemPrompt = `You are IBM Granite AI DevOps Log Analyzer & Incident Remediation Assistant.
 You have access to the following DevOps Knowledge Base context:
 ${ragContext}
 
-Analyze the provided cleaned CI/CD build error log and output ONLY a raw JSON object (strictly no markdown formatting, no code block backticks).
+Analyze the provided cleaned CI/CD build error log and application source code.
+Output ONLY a raw JSON object (strictly no markdown formatting, no code block backticks).
 The JSON MUST contain these exact key names:
 - status: string ("failed", "warning", or "success")
 - error_type: string (e.g. "Dependency Error", "React JSX Syntax Error", "Build Process Timeout")
 - severity: string ("High", "Medium", or "Low")
 - root_cause: string (concise 1-sentence statement of why the build failed)
-- explanation: string (detailed breakdown of the failure stack trace)
+- explanation: string (detailed breakdown of the failure stack trace and source file context)
 - recommended_fix: string (step-by-step shell commands or code fixes to resolve the issue)
 
-Error Log Snippet:
-${logContent.slice(0, 4000)}
+WORKFLOW LOG:
+${logContent.slice(0, 3500)}
+
+APPLICATION SOURCE FILE CONTEXT:
+${sourceContext}
 `;
 
             const controller = new AbortController();
@@ -737,12 +874,17 @@ ${logContent.slice(0, 4000)}
                 error_type: preprocessed.errorLineCount > 0 ? "Build Execution Error" : "Unknown Trace Failure",
                 severity: "High",
                 root_cause: preprocessed.snippets[0] ? preprocessed.snippets[0].slice(0, 200) : "Build failed during pipeline execution.",
-                explanation: `Analysis generated via RAG Knowledge Engine. Matches pattern: ${ragContext.slice(0, 150)}`,
+                explanation: `Analysis generated via RAG Knowledge Engine. Source File Context: ${sourceContext.slice(0, 100)}`,
                 recommended_fix: "Review stack trace snippets, check environment variables in .env, and re-run workflow."
             };
         }
 
-        const savedRecord = await saveIncidentRecord({ ...aiResult, run_id: runId }, `${owner}/${repo}`);
+        const savedRecord = await saveIncidentRecord({
+            ...aiResult,
+            run_id: runId,
+            affected_file: sourceFilePath || "N/A",
+            source_context: sourceContext
+        }, `${owner}/${repo}`);
 
         return res.json({
             ...aiResult,
