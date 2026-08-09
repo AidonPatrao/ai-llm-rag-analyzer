@@ -18,12 +18,21 @@ import {
     History,
     Database,
     Search,
-    ExternalLink
+    ExternalLink,
+    Settings,
+    User,
+    FolderGit2
 } from "lucide-react";
 import api from "../services/api";
 
 function Dashboard() {
-    // State management
+    // Repository & Account Configuration State
+    const [owner, setOwner] = useState(() => localStorage.getItem("gh_owner") || "AidonPatrao");
+    const [repo, setRepo] = useState(() => localStorage.getItem("gh_repo") || "ai-llm-rag-analyzer");
+    const [pat, setPat] = useState(() => localStorage.getItem("gh_pat") || "");
+    const [showConfig, setShowConfig] = useState(false);
+
+    // Navigation state
     const [activeTab, setActiveTab] = useState("dashboard"); // 'dashboard', 'analyze', 'incidents'
     const [file, setFile] = useState(null);
     const [logText, setLogText] = useState("");
@@ -50,16 +59,37 @@ function Dashboard() {
 
     const fileInputRef = useRef(null);
 
+    // Save configuration settings
+    const saveConfig = (newOwner, newRepo, newPat) => {
+        setOwner(newOwner);
+        setRepo(newRepo);
+        setPat(newPat);
+        localStorage.setItem("gh_owner", newOwner);
+        localStorage.setItem("gh_repo", newRepo);
+        localStorage.setItem("gh_pat", newPat);
+        setShowConfig(false);
+    };
+
+    // Helper for API headers
+    const getHeaders = () => ({
+        headers: {
+            "x-github-owner": owner,
+            "x-github-repo": repo,
+            "x-github-pat": pat
+        }
+    });
+
     // Fetch initial backend metrics & runs
     const fetchDashboardData = async () => {
         setLoadingData(true);
         try {
+            const config = getHeaders();
             const [metricsRes, riskRes, runsRes, failedRes, incidentsRes] = await Promise.allSettled([
-                api.get("/metrics"),
-                api.get("/risk-analysis"),
-                api.get("/github"),
-                api.get("/failed-builds"),
-                api.get("/api/incidents")
+                api.get("/metrics", config),
+                api.get("/risk-analysis", config),
+                api.get("/github", config),
+                api.get("/failed-builds", config),
+                api.get("/api/incidents", config)
             ]);
 
             if (metricsRes.status === "fulfilled") setMetrics(metricsRes.value.data);
@@ -76,7 +106,7 @@ function Dashboard() {
 
     useEffect(() => {
         fetchDashboardData();
-    }, []);
+    }, [owner, repo, pat]);
 
     // Analyze Log (RAG + Granite LLM)
     const runAIAnalysis = async (customLog = null, runId = "manual") => {
@@ -97,19 +127,24 @@ function Dashboard() {
 
         try {
             let res;
+            const config = getHeaders();
             if (inputMode === "file" && file && !customLog) {
                 const formData = new FormData();
                 formData.append("file", file);
                 formData.append("run_id", runId);
                 res = await api.post("/analyze", formData, {
-                    headers: { "Content-Type": "multipart/form-data" }
+                    ...config,
+                    headers: { 
+                        ...config.headers, 
+                        "Content-Type": "multipart/form-data" 
+                    }
                 });
             } else {
-                res = await api.post("/analyze", { log: textToAnalyze, run_id: runId });
+                res = await api.post("/analyze", { log: textToAnalyze, run_id: runId }, config);
             }
 
             setAnalysisResult(res.data);
-            fetchDashboardData(); // Refresh incidents history
+            fetchDashboardData();
         } catch (err) {
             console.error("Analysis Error:", err);
             setErrorMsg(err.response?.data?.root_cause || err.message || "Failed to analyze log.");
@@ -124,10 +159,10 @@ function Dashboard() {
         setLoadingLog(true);
         setLogPreview("");
         try {
-            const res = await api.get(`/logs/${id}`);
+            const res = await api.get(`/logs/${id}`, getHeaders());
             setLogPreview(res.data.clean_log_preview || "No log content retrieved.");
         } catch (err) {
-            setLogPreview(`Could not load log: ${err.message}. Ensure GITHUB_PAT is set in .env.`);
+            setLogPreview(`Could not load log: ${err.message}. Ensure GitHub PAT token is configured.`);
         } finally {
             setLoadingLog(false);
         }
@@ -175,7 +210,17 @@ function Dashboard() {
                         </div>
                         <div>
                             <h1 className="text-lg font-bold text-white tracking-tight">AI DevOps Assistant</h1>
-                            <p className="text-[11px] text-slate-400 font-mono">AidonPatrao/ai-llm-rag-analyzer</p>
+                            <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-purple-300 font-mono flex items-center gap-1">
+                                    <FolderGit2 className="w-3 h-3 text-purple-400" /> {owner} / {repo}
+                                </span>
+                                <button 
+                                    onClick={() => setShowConfig(!showConfig)}
+                                    className="text-[10px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 flex items-center gap-1 transition-all"
+                                >
+                                    <Settings className="w-3 h-3" /> Select Repo
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -207,6 +252,52 @@ function Dashboard() {
                         </button>
                     </div>
                 </div>
+
+                {/* Repository Configuration Modal / Drawer */}
+                {showConfig && (
+                    <div className="bg-slate-900 border-b border-purple-500/30 p-4 animate-in slide-in-from-top duration-200">
+                        <div className="max-w-7xl mx-auto grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+                            <div>
+                                <label className="block text-xs font-mono text-slate-400 mb-1">GitHub Username / Owner</label>
+                                <input
+                                    type="text"
+                                    value={owner}
+                                    onChange={(e) => setOwner(e.target.value)}
+                                    placeholder="e.g. AidonPatrao"
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-mono text-slate-400 mb-1">Repository Name</label>
+                                <input
+                                    type="text"
+                                    value={repo}
+                                    onChange={(e) => setRepo(e.target.value)}
+                                    placeholder="e.g. ai-llm-rag-analyzer"
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                />
+                            </div>
+                            <div className="flex gap-2">
+                                <div className="flex-1">
+                                    <label className="block text-xs font-mono text-slate-400 mb-1">GitHub PAT Token (Optional)</label>
+                                    <input
+                                        type="password"
+                                        value={pat}
+                                        onChange={(e) => setPat(e.target.value)}
+                                        placeholder="ghp_..."
+                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                    />
+                                </div>
+                                <button
+                                    onClick={() => saveConfig(owner, repo, pat)}
+                                    className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs shadow"
+                                >
+                                    Save
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </header>
 
             {/* Main Content Area */}
@@ -260,7 +351,7 @@ function Dashboard() {
                             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
                                 <div className="flex items-center justify-between mb-4">
                                     <h2 className="text-base font-bold text-white flex items-center gap-2">
-                                        <GitBranch className="w-4 h-4 text-purple-400" /> Recent GitHub Actions Runs
+                                        <GitBranch className="w-4 h-4 text-purple-400" /> Recent Runs ({owner}/{repo})
                                     </h2>
                                     <button onClick={fetchDashboardData} className="text-xs text-slate-400 hover:text-white flex items-center gap-1">
                                         <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? "animate-spin" : ""}`} /> Refresh
@@ -268,7 +359,7 @@ function Dashboard() {
                                 </div>
                                 <div className="space-y-3">
                                     {runs.length === 0 ? (
-                                        <p className="text-xs text-slate-500 italic py-4">No GitHub Action runs retrieved or GITHUB_PAT not configured.</p>
+                                        <p className="text-xs text-slate-500 italic py-4">No GitHub Action runs retrieved for {owner}/{repo}.</p>
                                     ) : (
                                         runs.map(run => (
                                             <div key={run.id} className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between text-xs">
@@ -301,7 +392,7 @@ function Dashboard() {
                                     {failedBuilds.length === 0 ? (
                                         <div className="p-6 text-center border border-dashed border-slate-800 rounded-xl">
                                             <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2 opacity-80" />
-                                            <p className="text-xs text-slate-400 font-medium">No active build failures detected in GitHub repository.</p>
+                                            <p className="text-xs text-slate-400 font-medium">No active build failures in repository {owner}/{repo}.</p>
                                         </div>
                                     ) : (
                                         failedBuilds.map(fb => (
@@ -504,6 +595,7 @@ function Dashboard() {
                                     <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
                                         <tr>
                                             <th className="p-3">Run ID</th>
+                                            <th className="p-3">Repo</th>
                                             <th className="p-3">Error Type</th>
                                             <th className="p-3">Severity</th>
                                             <th className="p-3">Root Cause</th>
@@ -514,6 +606,7 @@ function Dashboard() {
                                         {incidents.map(inc => (
                                             <tr key={inc.id} className="hover:bg-slate-950/40">
                                                 <td className="p-3 font-mono text-purple-300">{inc.run_id}</td>
+                                                <td className="p-3 font-mono text-slate-400">{inc.repo || `${owner}/${repo}`}</td>
                                                 <td className="p-3 font-semibold">{inc.error_type}</td>
                                                 <td className="p-3">{getSeverityBadge(inc.severity)}</td>
                                                 <td className="p-3 truncate max-w-xs">{inc.root_cause}</td>
@@ -534,7 +627,7 @@ function Dashboard() {
                     <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col shadow-2xl">
                         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
                             <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
-                                <Terminal className="w-4 h-4 text-purple-400" /> Preprocessed Log Trace — Run #{viewingLogId}
+                                <Terminal className="w-4 h-4 text-purple-400" /> Preprocessed Log Trace — Run #{viewingLogId} ({owner}/{repo})
                             </h3>
                             <button onClick={() => setViewingLogId(null)} className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded">Close</button>
                         </div>

@@ -11,7 +11,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configuration variables
+// Configuration default variables
 const GITHUB_PAT = process.env.GITHUB_PAT || process.env.GITHUB_TOKEN || "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "AidonPatrao";
 const GITHUB_REPO = process.env.GITHUB_REPO || "ai-llm-rag-analyzer";
@@ -27,7 +27,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // --- PostgreSQL Database Initialization ---
 let dbPool = null;
-let inMemoryIncidents = []; // Fallback in-memory store if Postgres is offline
+let inMemoryIncidents = [];
 
 if (DATABASE_URL) {
     try {
@@ -36,7 +36,6 @@ if (DATABASE_URL) {
             ssl: DATABASE_URL.includes("localhost") || DATABASE_URL.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
         });
         
-        // Auto-create incidents table
         dbPool.query(`
             CREATE TABLE IF NOT EXISTS incidents (
                 id SERIAL PRIMARY KEY,
@@ -60,11 +59,18 @@ if (DATABASE_URL) {
     }
 }
 
-async function saveIncidentRecord(incident) {
+function getRepoConfig(req) {
+    const owner = req?.headers?.["x-github-owner"] || GITHUB_OWNER;
+    const repo = req?.headers?.["x-github-repo"] || GITHUB_REPO;
+    const pat = req?.headers?.["x-github-pat"] || GITHUB_PAT;
+    return { owner, repo, pat };
+}
+
+async function saveIncidentRecord(incident, repoName) {
     const record = {
         id: Date.now(),
         run_id: incident.run_id || "manual-upload",
-        repo: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+        repo: repoName || `${GITHUB_OWNER}/${GITHUB_REPO}`,
         status: incident.status || "failed",
         error_type: incident.error_type || "Unclassified",
         severity: incident.severity || "Medium",
@@ -170,20 +176,15 @@ function preprocessLog(rawLogText) {
     const errorSnippets = [];
 
     lines.forEach((line, index) => {
-        // Strip ISO timestamp prefixes (e.g. 2026-08-09T01:56:38.1234567Z )
         const cleanLine = line.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*/, "").trim();
 
         if (!cleanLine) return;
-
-        // Skip noise setup lines
         if (noisePatterns.some(pattern => pattern.test(cleanLine))) return;
 
         filteredLines.push(cleanLine);
 
-        // Check for error keywords
         const lower = cleanLine.toLowerCase();
         if (errorKeywords.some(kw => lower.includes(kw))) {
-            // Grab context: 2 lines before and 2 lines after
             const start = Math.max(0, index - 2);
             const end = Math.min(lines.length - 1, index + 2);
             const context = lines.slice(start, end + 1).map(l => l.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s*/, "").trim()).join("\n");
@@ -191,7 +192,6 @@ function preprocessLog(rawLogText) {
         }
     });
 
-    // Deduplicate snippets
     const uniqueSnippets = [...new Set(errorSnippets)];
     const cleanText = uniqueSnippets.length > 0 ? uniqueSnippets.join("\n---\n") : filteredLines.slice(-100).join("\n");
 
@@ -204,15 +204,16 @@ function preprocessLog(rawLogText) {
 }
 
 // --- GitHub REST API Helper ---
-async function fetchGitHubAPI(endpoint) {
-    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}${endpoint}`;
+async function fetchGitHubAPI(endpoint, req) {
+    const { owner, repo, pat } = getRepoConfig(req);
+    const url = `https://api.github.com/repos/${owner}/${repo}${endpoint}`;
     const headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "DevOps-AI-Log-Analyzer"
     };
 
-    if (GITHUB_PAT) {
-        headers["Authorization"] = `Bearer ${GITHUB_PAT}`;
+    if (pat) {
+        headers["Authorization"] = `Bearer ${pat}`;
     }
 
     const response = await axios.get(url, { headers });
@@ -223,11 +224,12 @@ async function fetchGitHubAPI(endpoint) {
 
 // Health Check
 app.get("/api/health", (req, res) => {
+    const { owner, repo } = getRepoConfig(req);
     res.json({
         success: true,
         message: "DevOps AI Log Analyzer Backend is active 🚀",
         model: PRIMARY_MODEL,
-        github_repo: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+        github_repo: `${owner}/${repo}`,
         database_connected: !!dbPool,
         timestamp: new Date().toISOString()
     });
@@ -236,7 +238,7 @@ app.get("/api/health", (req, res) => {
 // GET /github: Latest 5 workflow runs
 app.get("/github", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI("/actions/runs?per_page=5");
+        const data = await fetchGitHubAPI("/actions/runs?per_page=5", req);
         const runs = (data.workflow_runs || []).map(r => ({
             id: r.id,
             name: r.name,
@@ -257,7 +259,7 @@ app.get("/github", async (req, res) => {
 // GET /failed-builds: Failed workflow runs
 app.get("/failed-builds", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI("/actions/runs?status=completed&per_page=20");
+        const data = await fetchGitHubAPI("/actions/runs?status=completed&per_page=20", req);
         const failedRuns = (data.workflow_runs || [])
             .filter(r => r.conclusion === "failure")
             .map(r => ({
@@ -279,7 +281,7 @@ app.get("/failed-builds", async (req, res) => {
 // GET /failed-builds/:id: Individual workflow details
 app.get("/failed-builds/:id", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI(`/actions/runs/${req.params.id}`);
+        const data = await fetchGitHubAPI(`/actions/runs/${req.params.id}`, req);
         res.json({ success: true, run: data });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -289,7 +291,7 @@ app.get("/failed-builds/:id", async (req, res) => {
 // GET /metrics: Build statistics and success rate
 app.get("/metrics", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI("/actions/runs?per_page=50");
+        const data = await fetchGitHubAPI("/actions/runs?per_page=50", req);
         const total = data.total_count || data.workflow_runs?.length || 0;
         const runs = data.workflow_runs || [];
         
@@ -318,7 +320,7 @@ app.get("/metrics", async (req, res) => {
 // GET /health-status: Status of latest workflow
 app.get("/health-status", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI("/actions/runs?per_page=1");
+        const data = await fetchGitHubAPI("/actions/runs?per_page=1", req);
         const latest = data.workflow_runs?.[0];
         const status = latest?.conclusion === "success" ? "Healthy" : latest?.conclusion === "failure" ? "Critical" : "Degraded";
         
@@ -340,7 +342,7 @@ app.get("/health-status", async (req, res) => {
 // GET /risk-analysis: Basic deployment risk analysis
 app.get("/risk-analysis", async (req, res) => {
     try {
-        const data = await fetchGitHubAPI("/actions/runs?per_page=10");
+        const data = await fetchGitHubAPI("/actions/runs?per_page=10", req);
         const runs = data.workflow_runs || [];
         const failures = runs.filter(r => r.conclusion === "failure").length;
         const riskLevel = failures >= 3 ? "High Risk" : failures >= 1 ? "Medium Risk" : "Low Risk";
@@ -361,10 +363,10 @@ app.get("/risk-analysis", async (req, res) => {
 app.get("/devops-summary", async (req, res) => {
     try {
         const [runsData, metricsData, healthData, riskData] = await Promise.allSettled([
-            fetchGitHubAPI("/actions/runs?per_page=5"),
-            fetchGitHubAPI("/actions/runs?per_page=20"),
-            fetchGitHubAPI("/actions/runs?per_page=1"),
-            fetchGitHubAPI("/actions/runs?per_page=10")
+            fetchGitHubAPI("/actions/runs?per_page=5", req),
+            fetchGitHubAPI("/actions/runs?per_page=20", req),
+            fetchGitHubAPI("/actions/runs?per_page=1", req),
+            fetchGitHubAPI("/actions/runs?per_page=10", req)
         ]);
 
         res.json({
@@ -382,10 +384,11 @@ app.get("/devops-summary", async (req, res) => {
 // GET /logs/:id: Download & extract GitHub Actions log ZIP
 app.get("/logs/:id", async (req, res) => {
     try {
+        const { owner, repo, pat } = getRepoConfig(req);
         const runId = req.params.id;
-        const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${runId}/logs`;
+        const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/logs`;
         const headers = { "User-Agent": "DevOps-AI-Log-Analyzer" };
-        if (GITHUB_PAT) headers["Authorization"] = `Bearer ${GITHUB_PAT}`;
+        if (pat) headers["Authorization"] = `Bearer ${pat}`;
 
         const logZipResponse = await axios.get(url, { headers, responseType: "arraybuffer" });
         const zip = new AdmZip(Buffer.from(logZipResponse.data));
@@ -398,7 +401,6 @@ app.get("/logs/:id", async (req, res) => {
             }
         });
 
-        // Phase 8 Intelligent Preprocessing
         const processed = preprocessLog(fullRawLog);
 
         res.json({
@@ -433,6 +435,7 @@ app.get("/api/incidents", async (req, res) => {
 // POST /analyze & /api/analyze: Full RAG + Granite AI Log Analysis
 async function handleLogAnalysis(req, res) {
     try {
+        const { owner, repo } = getRepoConfig(req);
         let rawLog = "";
         let runId = req.body?.run_id || "manual-upload";
 
@@ -453,14 +456,11 @@ async function handleLogAnalysis(req, res) {
             });
         }
 
-        // 1. Preprocess Log
         const preprocessed = preprocessLog(rawLog);
         const logContent = preprocessed.cleanText || rawLog.slice(0, 3500);
 
-        // 2. Retrieve RAG Context
         const ragContext = retrieveRAGContext(logContent);
 
-        // 3. Prompt Granite LLM
         let aiResult = null;
         try {
             const systemPrompt = `You are IBM Granite AI DevOps Log Analyzer & Incident Remediation Assistant.
@@ -515,7 +515,6 @@ ${logContent.slice(0, 4000)}
             console.warn("Ollama LLM call failed or timed out. Utilizing RAG fallback engine.");
         }
 
-        // Fallback if LLM is unavailable or output invalid JSON
         if (!aiResult) {
             aiResult = {
                 status: "failed",
@@ -527,8 +526,7 @@ ${logContent.slice(0, 4000)}
             };
         }
 
-        // 4. Save Incident Record to DB
-        const savedRecord = await saveIncidentRecord({ ...aiResult, run_id: runId });
+        const savedRecord = await saveIncidentRecord({ ...aiResult, run_id: runId }, `${owner}/${repo}`);
 
         return res.json({
             ...aiResult,
@@ -556,5 +554,5 @@ app.post("/api/analyze", upload.single("file"), handleLogAnalysis);
 app.listen(PORT, () => {
     console.log(`🚀 DevOps AI Assistant Backend running on http://localhost:${PORT}`);
     console.log(`🤖 Configured Granite Model: ${PRIMARY_MODEL} via ${OLLAMA_URL}`);
-    console.log(`🐙 GitHub Repo Target: ${GITHUB_OWNER}/${GITHUB_REPO}`);
+    console.log(`🐙 Default GitHub Repo Target: ${GITHUB_OWNER}/${GITHUB_REPO}`);
 });
