@@ -42,12 +42,15 @@ function Dashboard() {
     // Repository State
     const [owner, setOwner] = useState(() => localStorage.getItem("gh_owner") || "AidonPatrao");
     const [repo, setRepo] = useState(() => localStorage.getItem("gh_repo") || "ai-llm-rag-analyzer");
+    const [manualOwnerInput, setManualOwnerInput] = useState(() => localStorage.getItem("gh_owner") || "AidonPatrao");
+    const [manualRepoInput, setManualRepoInput] = useState(() => localStorage.getItem("gh_repo") || "ai-llm-rag-analyzer");
     const [patInput, setPatInput] = useState(() => localStorage.getItem("gh_pat") || "");
     const [showConfig, setShowConfig] = useState(false);
 
     // Auto-discovered user repositories list
     const [userRepos, setUserRepos] = useState([]);
     const [loadingRepos, setLoadingRepos] = useState(false);
+    const [repoErrorMsg, setRepoErrorMsg] = useState("");
 
     // Navigation state
     const [activeTab, setActiveTab] = useState("dashboard");
@@ -178,13 +181,19 @@ function Dashboard() {
     // Auto-fetch user's repository list
     const fetchUserRepositories = async () => {
         setLoadingRepos(true);
+        setRepoErrorMsg("");
         try {
             const res = await api.get("/api/github/user-repos", getHeaders());
-            if (res.data?.success) {
-                setUserRepos(res.data.repos || []);
+            if (res.data?.success && Array.isArray(res.data.repos)) {
+                setUserRepos(res.data.repos);
+            } else {
+                setUserRepos([]);
+                if (res.data?.error) setRepoErrorMsg(res.data.error);
             }
         } catch (err) {
             console.warn("Could not fetch user repos:", err);
+            setRepoErrorMsg(err.message || "Failed to load repositories from GitHub API.");
+            setUserRepos([]);
         } finally {
             setLoadingRepos(false);
         }
@@ -197,11 +206,22 @@ function Dashboard() {
     }, [showConfig, owner, githubToken]);
 
     const selectRepository = (selectedOwner, selectedRepo) => {
-        setOwner(selectedOwner);
-        setRepo(selectedRepo);
-        localStorage.setItem("gh_owner", selectedOwner);
-        localStorage.setItem("gh_repo", selectedRepo);
+        const ownerStr = typeof selectedOwner === "string" ? selectedOwner : selectedOwner?.login || owner;
+        const repoStr = typeof selectedRepo === "string" ? selectedRepo : repo;
+        
+        setOwner(ownerStr);
+        setRepo(repoStr);
+        setManualOwnerInput(ownerStr);
+        setManualRepoInput(repoStr);
+        localStorage.setItem("gh_owner", ownerStr);
+        localStorage.setItem("gh_repo", repoStr);
         setShowConfig(false);
+    };
+
+    const handleCustomRepoConnect = () => {
+        if (manualOwnerInput && manualRepoInput) {
+            selectRepository(manualOwnerInput.trim(), manualRepoInput.trim());
+        }
     };
 
     // Fetch initial backend metrics & runs
@@ -458,9 +478,39 @@ function Dashboard() {
                                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
                                         <FolderGit2 className="w-4 h-4 text-purple-400" /> Select GitHub Repository & Token Settings
                                     </h3>
-                                    <p className="text-xs text-slate-400 mt-0.5">Pick any repository or update your GitHub PAT Token (`ghp_...`).</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">Pick any repository from your GitHub account or type a custom Owner/Repo target.</p>
                                 </div>
                                 <button onClick={() => setShowConfig(false)} className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded">Close</button>
+                            </div>
+
+                            {/* Manual Repository Input Bar */}
+                            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-wrap items-end gap-3">
+                                <div className="flex-1 min-w-[160px]">
+                                    <label className="block text-xs font-mono text-slate-400 mb-1">GitHub Owner</label>
+                                    <input
+                                        type="text"
+                                        value={manualOwnerInput}
+                                        onChange={(e) => setManualOwnerInput(e.target.value)}
+                                        placeholder="e.g. AidonPatrao"
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                    />
+                                </div>
+                                <div className="flex-1 min-w-[160px]">
+                                    <label className="block text-xs font-mono text-slate-400 mb-1">GitHub Repository</label>
+                                    <input
+                                        type="text"
+                                        value={manualRepoInput}
+                                        onChange={(e) => setManualRepoInput(e.target.value)}
+                                        placeholder="e.g. ai-llm-rag-analyzer"
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                    />
+                                </div>
+                                <button
+                                    onClick={handleCustomRepoConnect}
+                                    className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg shadow"
+                                >
+                                    Connect Repository
+                                </button>
                             </div>
 
                             {/* PAT Token Configuration Bar */}
@@ -487,37 +537,45 @@ function Dashboard() {
 
                             {/* Discovered Repository Cards */}
                             <div>
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs font-mono text-slate-400">Available Repositories</span>
+                                    <button 
+                                        onClick={fetchUserRepositories}
+                                        className="text-[11px] text-purple-300 hover:text-white flex items-center gap-1"
+                                    >
+                                        <RefreshCw className={`w-3 h-3 ${loadingRepos ? "animate-spin" : ""}`} /> Fetch Repos
+                                    </button>
+                                </div>
+
                                 {loadingRepos ? (
                                     <p className="text-xs text-slate-400 italic py-2">Loading your GitHub repositories...</p>
-                                ) : userRepos.length === 0 ? (
-                                    <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-950 p-3 rounded-lg border border-slate-800">
-                                        <span>Currently targetting: <strong className="text-purple-300">{owner}/{repo}</strong></span>
-                                        <button 
-                                            onClick={() => selectRepository(owner, repo)} 
-                                            className="ml-auto px-3 py-1 rounded bg-purple-600 text-white font-medium text-xs"
-                                        >
-                                            Connect
-                                        </button>
+                                ) : userRepos.length > 0 ? (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
+                                        {userRepos.map(r => {
+                                            const rOwner = typeof r.owner === "string" ? r.owner : r.owner?.login || owner;
+                                            return (
+                                                <button
+                                                    key={r.id}
+                                                    onClick={() => selectRepository(rOwner, r.name)}
+                                                    className={`p-2.5 rounded-lg border text-left transition-all text-xs flex items-center justify-between ${
+                                                        r.name === repo && rOwner === owner 
+                                                        ? "bg-purple-950/60 border-purple-500 text-purple-200 font-semibold" 
+                                                        : "bg-slate-950/60 border-slate-800 hover:border-purple-500/40 text-slate-300 hover:bg-slate-900"
+                                                    }`}
+                                                >
+                                                    <div className="truncate">
+                                                        <p className="font-semibold text-slate-200 truncate">{r.name}</p>
+                                                        <p className="text-[10px] text-slate-500 font-mono">{r.full_name || `${rOwner}/${r.name}`}</p>
+                                                    </div>
+                                                    {r.is_private && <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 ml-2 shrink-0">Private</span>}
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 ) : (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
-                                        {userRepos.map(r => (
-                                            <button
-                                                key={r.id}
-                                                onClick={() => selectRepository(r.owner, r.name)}
-                                                className={`p-2.5 rounded-lg border text-left transition-all text-xs flex items-center justify-between ${
-                                                    r.name === repo && r.owner === owner 
-                                                    ? "bg-purple-950/60 border-purple-500 text-purple-200 font-semibold" 
-                                                    : "bg-slate-950/60 border-slate-800 hover:border-purple-500/40 text-slate-300 hover:bg-slate-900"
-                                                }`}
-                                            >
-                                                <div className="truncate">
-                                                    <p className="font-semibold text-slate-200 truncate">{r.name}</p>
-                                                    <p className="text-[10px] text-slate-500 font-mono">{r.full_name}</p>
-                                                </div>
-                                                {r.is_private && <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 ml-2 shrink-0">Private</span>}
-                                            </button>
-                                        ))}
+                                    <div className="text-xs text-slate-400 bg-slate-950 p-3 rounded-lg border border-slate-800 flex items-center justify-between">
+                                        <span>Targeting: <strong className="text-purple-300">{owner}/{repo}</strong></span>
+                                        {repoErrorMsg && <span className="text-amber-400 text-[11px] ml-2 truncate max-w-xs">{repoErrorMsg}</span>}
                                     </div>
                                 )}
                             </div>
