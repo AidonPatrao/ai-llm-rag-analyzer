@@ -21,8 +21,8 @@ const GITHUB_REPO = process.env.GITHUB_REPO || "ai-llm-rag-analyzer";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const PRIMARY_MODEL = process.env.GRANITE_MODEL || "granite4:3b";
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://dplzsinymsoyudtlabhd.supabase.co";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRwbHpzaW55bXNveXVkdGxhYmhkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYyNDU0MDIsImV4cCI6MjEwMTgyMTQwMn0.o77vKrX3HJF7b5qJmizA3-1VScwVj5om6zbPhYTrNyM";
 
 app.use(cors());
 app.use(express.json({ limit: "15mb" }));
@@ -39,7 +39,7 @@ let runAnalysisCache = new Map();
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     try {
         supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        console.log("⚡ Supabase Client initialized.");
+        console.log("⚡ Supabase Client initialized for project:", SUPABASE_URL);
     } catch (err) {
         console.warn("⚠️ Supabase initialization warning:", err.message);
     }
@@ -766,4 +766,5 @@ app.listen(PORT, () => {
     console.log(`🚀 DevOps AI Assistant Backend running on http://localhost:${PORT}`);
     console.log(`🤖 Configured Granite Model: ${PRIMARY_MODEL} via ${OLLAMA_URL}`);
     console.log(`🐙 Default GitHub Repo Target: ${GITHUB_OWNER}/${GITHUB_REPO}`);
+    console.log(`⚡ Supabase URL: ${SUPABASE_URL}`);
 });
