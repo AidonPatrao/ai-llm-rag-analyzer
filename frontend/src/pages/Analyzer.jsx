@@ -23,7 +23,9 @@ import {
     User,
     FolderGit2,
     ListFilter,
-    Key
+    Key,
+    ChevronDown,
+    ChevronUp
 } from "lucide-react";
 import api from "../services/api";
 
@@ -42,7 +44,7 @@ function Dashboard() {
     const [activeTab, setActiveTab] = useState("dashboard"); // 'dashboard', 'analyze', 'incidents'
     const [file, setFile] = useState(null);
     const [logText, setLogText] = useState("");
-    const [inputMode, setInputMode] = useState("file"); // 'file' or 'text'
+    const [inputMode, setInputMode] = useState("file");
     
     // Data states from backend
     const [metrics, setMetrics] = useState(null);
@@ -51,7 +53,10 @@ function Dashboard() {
     const [failedBuilds, setFailedBuilds] = useState([]);
     const [incidents, setIncidents] = useState([]);
     
-    // Analysis state
+    // Expanded run cards state for AI analysis details
+    const [expandedRunId, setExpandedRunId] = useState(null);
+
+    // Analysis state (for manual upload tab)
     const [analysisResult, setAnalysisResult] = useState(null);
     const [loadingAnalysis, setLoadingAnalysis] = useState(false);
     const [loadingData, setLoadingData] = useState(true);
@@ -134,7 +139,7 @@ function Dashboard() {
         fetchDashboardData();
     }, [owner, repo, pat]);
 
-    // Analyze Log (RAG + Granite LLM)
+    // Manual Log Analysis (RAG + Granite LLM)
     const runAIAnalysis = async (customLog = null, runId = "manual") => {
         const textToAnalyze = customLog || (inputMode === "text" ? logText : null);
         
@@ -194,9 +199,9 @@ function Dashboard() {
         }
     };
 
-    const copyFix = () => {
-        if (analysisResult?.recommended_fix) {
-            navigator.clipboard.writeText(analysisResult.recommended_fix);
+    const copyFixText = (text) => {
+        if (text) {
+            navigator.clipboard.writeText(text);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         }
@@ -258,7 +263,7 @@ function Dashboard() {
                                 activeTab === "dashboard" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
                             }`}
                         >
-                            Overview
+                            Automated Pipeline Dashboard
                         </button>
                         <button
                             onClick={() => setActiveTab("analyze")}
@@ -266,7 +271,7 @@ function Dashboard() {
                                 activeTab === "analyze" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
                             }`}
                         >
-                            AI Log Analyzer
+                            Custom Log Analyzer
                         </button>
                         <button
                             onClick={() => setActiveTab("incidents")}
@@ -274,7 +279,7 @@ function Dashboard() {
                                 activeTab === "incidents" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
                             }`}
                         >
-                            Incident DB ({incidents.length})
+                            PostgreSQL Incidents ({incidents.length})
                         </button>
                     </div>
                 </div>
@@ -382,7 +387,7 @@ function Dashboard() {
             {/* Main Content Area */}
             <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full">
                 
-                {/* 1. OVERVIEW DASHBOARD TAB */}
+                {/* 1. AUTOMATED PIPELINE DASHBOARD TAB */}
                 {activeTab === "dashboard" && (
                     <div className="space-y-6 animate-in fade-in duration-300">
                         {/* Status Cards Row */}
@@ -424,81 +429,118 @@ function Dashboard() {
                             </div>
                         </div>
 
-                        {/* Recent Workflow Runs & Failed Builds */}
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            {/* Workflow Runs List */}
-                            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-                                <div className="flex items-center justify-between mb-4">
+                        {/* Automatic CI/CD Pipeline Runs & Direct AI Diagnoses */}
+                        <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                            <div className="flex items-center justify-between mb-6">
+                                <div>
                                     <h2 className="text-base font-bold text-white flex items-center gap-2">
-                                        <GitBranch className="w-4 h-4 text-purple-400" /> Recent Runs ({owner}/{repo})
+                                        <Sparkles className="w-4 h-4 text-purple-400" /> Automated Pipeline AI Diagnoses ({owner}/{repo})
                                     </h2>
-                                    <button onClick={fetchDashboardData} className="text-xs text-slate-400 hover:text-white flex items-center gap-1">
-                                        <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? "animate-spin" : ""}`} /> Refresh
-                                    </button>
+                                    <p className="text-xs text-slate-400 mt-0.5">Logs are automatically fetched from GitHub, preprocessed, passed to RAG + Granite AI, and displayed below.</p>
                                 </div>
-                                <div className="space-y-3">
-                                    {runs.length === 0 ? (
-                                        <p className="text-xs text-slate-500 italic py-4">No GitHub Action runs retrieved for {owner}/{repo}.</p>
-                                    ) : (
-                                        runs.map(run => (
-                                            <div key={run.id} className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between text-xs">
-                                                <div>
-                                                    <p className="font-semibold text-slate-200">{run.name}</p>
-                                                    <p className="text-slate-500 font-mono text-[11px] mt-0.5">#{run.id} • {run.branch}</p>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    {run.conclusion === "success" ? (
-                                                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[11px]">Success</span>
-                                                    ) : (
-                                                        <span className="px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/30 text-[11px]">Failed</span>
-                                                    )}
-                                                    <button onClick={() => fetchRunLog(run.id)} className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300">
-                                                        <Terminal className="w-3.5 h-3.5" />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        ))
-                                    )}
-                                </div>
+                                <button onClick={fetchDashboardData} className="text-xs text-slate-400 hover:text-white flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700">
+                                    <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? "animate-spin" : ""}`} /> Refresh Pipeline
+                                </button>
                             </div>
 
-                            {/* Failed Builds & Fast Diagnose */}
-                            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-                                <h2 className="text-base font-bold text-white flex items-center gap-2 mb-4">
-                                    <AlertTriangle className="w-4 h-4 text-amber-400" /> Failed Builds Diagnostics
-                                </h2>
-                                <div className="space-y-3">
-                                    {failedBuilds.length === 0 ? (
-                                        <div className="p-6 text-center border border-dashed border-slate-800 rounded-xl">
-                                            <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2 opacity-80" />
-                                            <p className="text-xs text-slate-400 font-medium">No active build failures in repository {owner}/{repo}.</p>
-                                        </div>
-                                    ) : (
-                                        failedBuilds.map(fb => (
-                                            <div key={fb.id} className="p-3.5 rounded-xl bg-red-950/20 border border-red-500/20 flex items-center justify-between text-xs">
-                                                <div>
-                                                    <p className="font-semibold text-red-200">{fb.name}</p>
-                                                    <p className="text-slate-500 font-mono text-[11px]">ID: {fb.id} • Branch: {fb.branch}</p>
+                            <div className="space-y-4">
+                                {runs.length === 0 ? (
+                                    <p className="text-xs text-slate-500 italic py-6 text-center">No GitHub Action runs retrieved for {owner}/{repo}.</p>
+                                ) : (
+                                    runs.map(run => {
+                                        const isExpanded = expandedRunId === run.id;
+                                        const ai = run.ai_analysis;
+                                        return (
+                                            <div key={run.id} className="rounded-xl bg-slate-950/70 border border-slate-800/90 overflow-hidden transition-all">
+                                                {/* Header Bar */}
+                                                <div className="p-4 flex flex-wrap items-center justify-between gap-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`p-2 rounded-lg ${run.conclusion === "success" ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}`}>
+                                                            {run.conclusion === "success" ? <CheckCircle2 className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                                                        </div>
+                                                        <div>
+                                                            <div className="flex items-center gap-2">
+                                                                <h3 className="font-bold text-slate-100 text-sm">{run.name}</h3>
+                                                                <span className="text-[11px] font-mono text-purple-300 bg-purple-950/60 px-2 py-0.5 rounded border border-purple-500/30">
+                                                                    #{run.id}
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-xs text-slate-400 font-mono mt-0.5">
+                                                                Branch: <span className="text-slate-300">{run.branch}</span> • {new Date(run.created_at).toLocaleTimeString()}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center gap-3">
+                                                        {ai && getSeverityBadge(ai.severity)}
+                                                        <button
+                                                            onClick={() => fetchRunLog(run.id)}
+                                                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs flex items-center gap-1"
+                                                            title="View Preprocessed Log"
+                                                        >
+                                                            <Terminal className="w-3.5 h-3.5" /> Log Trace
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
+                                                            className="px-3 py-1.5 rounded-lg bg-purple-900/40 hover:bg-purple-900/80 border border-purple-500/30 text-purple-200 text-xs font-semibold flex items-center gap-1"
+                                                        >
+                                                            <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                                                            <span>{isExpanded ? "Hide AI Diagnosis" : "View AI Diagnosis"}</span>
+                                                            {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                                <button 
-                                                    onClick={() => {
-                                                        setActiveTab("analyze");
-                                                        runAIAnalysis(null, fb.id);
-                                                    }}
-                                                    className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-medium shadow flex items-center gap-1.5 text-xs"
-                                                >
-                                                    <Sparkles className="w-3.5 h-3.5" /> Run AI Diagnosis
-                                                </button>
+
+                                                {/* Automatic AI Diagnostic Card (Shown by Default or when Expanded) */}
+                                                {(isExpanded || run.conclusion === "failure") && (
+                                                    <div className="p-4 bg-slate-900/60 border-t border-slate-800/80 space-y-4 animate-in fade-in duration-200">
+                                                        {ai ? (
+                                                            <>
+                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                                                                        <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Error Type</p>
+                                                                        <p className="text-xs font-bold text-purple-300">{ai.error_type || "Build Trace Summary"}</p>
+                                                                    </div>
+                                                                    <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                                                                        <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Root Cause</p>
+                                                                        <p className="text-xs font-mono text-slate-300 truncate">{ai.root_cause}</p>
+                                                                    </div>
+                                                                </div>
+
+                                                                <div>
+                                                                    <div className="flex items-center justify-between mb-1.5">
+                                                                        <p className="text-[11px] font-mono text-amber-400 uppercase tracking-wider flex items-center gap-1">
+                                                                            <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Automated RAG + Granite Fix Recommendation
+                                                                        </p>
+                                                                        <button
+                                                                            onClick={() => copyFixText(ai.recommended_fix)}
+                                                                            className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800"
+                                                                        >
+                                                                            <Copy className="w-3 h-3" /> Copy Fix
+                                                                        </button>
+                                                                    </div>
+                                                                    <div className="bg-amber-950/20 border border-amber-500/20 rounded-lg p-3 text-xs font-sans text-amber-200 leading-relaxed">
+                                                                        {ai.recommended_fix || ai.suggestion}
+                                                                    </div>
+                                                                </div>
+                                                            </>
+                                                        ) : (
+                                                            <div className="p-4 text-center text-xs text-slate-400 italic">
+                                                                Automatic log preprocessor & Granite AI analyzing run...
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
-                                        ))
-                                    )}
-                                </div>
+                                        );
+                                    })
+                                )}
                             </div>
                         </div>
                     </div>
                 )}
 
-                {/* 2. AI LOG ANALYZER TAB */}
+                {/* 2. CUSTOM LOG ANALYZER TAB */}
                 {activeTab === "analyze" && (
                     <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-300">
                         <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 md:p-8 shadow-2xl backdrop-blur-xl">
@@ -590,7 +632,7 @@ function Dashboard() {
                                     ) : (
                                         <>
                                             <Cpu className="w-4 h-4" />
-                                            <span>Analyze Log Trace</span>
+                                            <span>Analyze Custom Trace</span>
                                         </>
                                     )}
                                 </button>
@@ -637,11 +679,11 @@ function Dashboard() {
                                                 <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Recommended Fix Action
                                             </h4>
                                             <button
-                                                onClick={copyFix}
+                                                onClick={() => copyFixText(analysisResult.recommended_fix || analysisResult.suggestion)}
                                                 className="text-xs text-slate-400 hover:text-white flex items-center gap-1 px-2 py-1 rounded bg-slate-800"
                                             >
-                                                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                                                <span>{copied ? "Copied" : "Copy Fix"}</span>
+                                                <Copy className="w-3.5 h-3.5" />
+                                                <span>Copy Fix</span>
                                             </button>
                                         </div>
                                         <div className="bg-amber-950/20 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-200 leading-relaxed">
@@ -654,7 +696,7 @@ function Dashboard() {
                     </div>
                 )}
 
-                {/* 3. INCIDENT HISTORY TAB */}
+                {/* 3. POSTGRESQL INCIDENTS TAB */}
                 {activeTab === "incidents" && (
                     <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl animate-in fade-in duration-300">
                         <div className="flex items-center justify-between mb-6">
