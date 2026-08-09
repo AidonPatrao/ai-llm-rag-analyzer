@@ -140,15 +140,16 @@ function Dashboard() {
         }
     };
 
-    const handleLogout = async () => {
+    // Full Complete Logout & Reset
+    const handleFullLogout = async () => {
         try {
             await supabase.auth.signOut();
         } catch (e) {}
+        localStorage.clear();
         setSession(null);
         setUserProfile(null);
         setGithubToken("");
-        localStorage.removeItem("gh_token");
-        localStorage.removeItem("gh_owner");
+        window.location.href = window.location.origin;
     };
 
     // Helper for API headers
@@ -367,7 +368,7 @@ function Dashboard() {
                         </div>
                     </div>
 
-                    {/* Right User Profile & Navigation Tabs */}
+                    {/* Right User Profile & Navigation Tabs & LOGOUT BUTTON */}
                     <div className="flex items-center gap-4">
                         <div className="flex gap-1 p-1 bg-slate-950/80 border border-slate-800 rounded-xl">
                             <button
@@ -396,20 +397,18 @@ function Dashboard() {
                             </button>
                         </div>
 
-                        {/* Always Visible Sign Out / Logout Button */}
-                        <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
-                            {userProfile?.user_metadata?.avatar_url ? (
+                        {/* HIGH VISIBILITY LOGOUT BUTTON */}
+                        <div className="flex items-center gap-3 border-l border-slate-800 pl-4">
+                            {userProfile?.user_metadata?.avatar_url && (
                                 <img src={userProfile.user_metadata.avatar_url} alt="Profile" className="w-7 h-7 rounded-full border border-purple-500/40" />
-                            ) : (
-                                <User className="w-5 h-5 text-purple-400" />
                             )}
                             <button 
-                                onClick={handleLogout} 
-                                className="px-3 py-1.5 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm" 
-                                title="Sign Out of GitHub Session"
+                                onClick={handleFullLogout} 
+                                className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-red-950/50 hover:scale-105 active:scale-95" 
+                                title="Click to log out and open Sign In screen"
                             >
                                 <LogOut className="w-3.5 h-3.5" />
-                                <span>Sign Out</span>
+                                <span>Log Out / Sign In</span>
                             </button>
                         </div>
                     </div>
