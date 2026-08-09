@@ -35,6 +35,24 @@ let dbPool = null;
 let supabase = null;
 let inMemoryIncidents = [];
 let runAnalysisCache = new Map();
+let pendingAnalysis = new Map(); // In-flight lock: prevents duplicate parallel Granite calls
+
+// Global Granite queue — only 1 LLM call at a time (granite4:3b is single-threaded)
+let graniteQueueRunning = false;
+const graniteQueue = [];
+function enqueueGraniteCall(fn) {
+    return new Promise((resolve, reject) => {
+        graniteQueue.push({ fn, resolve, reject });
+        processGraniteQueue();
+    });
+}
+async function processGraniteQueue() {
+    if (graniteQueueRunning || graniteQueue.length === 0) return;
+    graniteQueueRunning = true;
+    const { fn, resolve, reject } = graniteQueue.shift();
+    try { resolve(await fn()); } catch (e) { reject(e); }
+    finally { graniteQueueRunning = false; processGraniteQueue(); }
+}
 
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     try {
@@ -318,10 +336,14 @@ function extractSourceFilePath(logText) {
         filePath = mentionMatch[1];
     }
 
-    // Strip absolute runner paths like /home/runner/work/repo/repo/ leaving relative path
+    // Strip absolute runner paths like /home/runner/work/repo/repo/
     if (filePath) {
         filePath = filePath.replace(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "");
-        filePath = filePath.replace(/^.*node_modules\//, "node_modules/");
+    }
+
+    // Skip node_modules — they're never in the repo and always 404
+    if (filePath && filePath.startsWith("node_modules")) {
+        filePath = null; lineNumber = null; colNumber = null;
     }
 
     // Heuristic for health-check timeout demo
@@ -397,14 +419,35 @@ async function autoAnalyzeRun(runId, req, force = false) {
         const existing = await getExistingAnalysis(runIdStr);
         if (existing) return existing;
     } else {
-        // Clear stale cache entry so fresh analysis is stored
         runAnalysisCache.delete(runIdStr);
         console.log(`🔄 Force re-analysis for run #${runIdStr} — cache cleared`);
     }
 
-    const { owner, repo, pat } = getRepoConfig(req);
+    // In-flight deduplication: if already being analyzed, wait for it
+    if (pendingAnalysis.has(runIdStr)) {
+        console.log(`⏳ Run #${runIdStr} already being analyzed — waiting for in-flight result...`);
+        return pendingAnalysis.get(runIdStr);
+    }
+
+    // Create a promise and register it so parallel requests reuse it
+    let resolvePending;
+    const pendingPromise = new Promise(resolve => { resolvePending = resolve; });
+    pendingAnalysis.set(runIdStr, pendingPromise);
+
+    try {
+        const result = await _doAnalyzeRun(runIdStr, req);
+        resolvePending(result);
+        return result;
+    } finally {
+        pendingAnalysis.delete(runIdStr);
+    }
+}
+
+// Internal: actual analysis logic (called only once per run at a time)
+async function _doAnalyzeRun(runIdStr, req) {
 
     // --- STEP 1: Fetch actual run conclusion from GitHub API first ---
+    const { owner, repo, pat } = getRepoConfig(req);
     let runConclusion = null;
     let runName = null;
     try {
@@ -462,73 +505,102 @@ async function autoAnalyzeRun(runId, req, force = false) {
         let annotatedCode = "";
 
         if (sourceFilePath) {
+            // Try the extracted path, then common subdirectory prefixes if 404
+            const pathsToTry = [
+                sourceFilePath,
+                `src/${sourceFilePath}`,
+                `backend/${sourceFilePath}`,
+                `frontend/src/${sourceFilePath}`,
+                `app/${sourceFilePath}`
+            ];
             console.log(`📄 Reading source file: ${sourceFilePath}${lineNumber ? ` (line ${lineNumber})` : ""}`);
-            const fetchResult = await fetchSourceCodeFromGitHub(sourceFilePath, req, lineNumber);
+            let fetchResult = null;
+            let resolvedPath = null;
+            for (const p of pathsToTry) {
+                fetchResult = await fetchSourceCodeFromGitHub(p, req, lineNumber);
+                if (fetchResult) { resolvedPath = p; break; }
+            }
             if (fetchResult) {
                 annotatedCode = fetchResult.annotatedSnippet;
                 sourceContext = [
-                    `FILE: ${sourceFilePath}`,
+                    `FILE: ${resolvedPath}`,
                     lineNumber ? `FAILING LINE: ${lineNumber}${colNumber ? `:${colNumber}` : ""}` : "",
                     "",
                     annotatedCode
                 ].filter(Boolean).join("\n");
-                console.log(`✅ Source file read successfully: ${sourceFilePath} (${fetchResult.content.split("\n").length} lines)`);
+                console.log(`✅ Source file read: ${resolvedPath} (${fetchResult.content.split("\n").length} lines)`);
             } else {
-                sourceContext = `FILE: ${sourceFilePath}${lineNumber ? ` (line ${lineNumber})` : ""}\nCould not fetch file — check GitHub PAT permissions.`;
+                sourceContext = `FILE: ${sourceFilePath}${lineNumber ? ` (line ${lineNumber})` : ""}\nFile not found in repo — tried: ${pathsToTry.join(", ")}`;
+                console.warn(`⚠️ Source file not found: ${sourceFilePath} (tried ${pathsToTry.length} paths)`);
             }
         }
 
-        // --- STEP 4: Call Ollama Granite LLM ---
+        // --- STEP 4: Call Ollama Granite LLM (queued — only 1 at a time) ---
         let aiResult = null;
         console.log(`🤖 Calling Ollama Granite (${PRIMARY_MODEL}) for failed run #${runIdStr}...`);
         try {
-            const systemPrompt = `You are IBM Granite, an expert AI DevOps engineer and code reviewer.
+            const systemPrompt = `You are IBM Granite, a senior AI DevOps engineer and code reviewer.
 
-DevOps Knowledge Base (RAG context):
+DevOps Knowledge Base:
 ${ragContext}
 
-Your task: Analyze the CI/CD failure log and the ACTUAL SOURCE CODE below, then produce a diagnosis and fix.
+YOUR TASK:
+Read the GitHub Actions failure log and the annotated source code below.
+Identify the ROOT CAUSE and provide a concrete, developer-ready fix.
 
-RULES:
-- Read the source code carefully. The exact failing line is marked with >>> in the snippet.
-- Your recommended_fix MUST reference the actual code — quote the broken line and show what it should be changed to.
-- Write recommended_fix and explanation in clear, natural language that a developer can act on immediately.
-- Do NOT invent errors. Only diagnose what is visible in the log and source code.
-- Output ONLY a valid raw JSON object. No markdown, no backticks, no extra text.
+CRITICAL RULES:
+1. The line marked >>> is WHERE THE EXCEPTION WAS THROWN — NOT necessarily the bug itself.
+   - If >>> is a "throw new Error(...)" line, look BACKWARDS in the snippet to find where the bad value was computed.
+   - Identify the actual line that needs to change (may be several lines above >>>).
+2. NEVER suggest "change the error message text" — that fixes nothing.
+3. Quote the ACTUAL buggy line and show the corrected version.
+4. Your explanation must show you understood what the code does: trace the variable from its origin to where it causes the failure.
+5. The recommended_fix must be a specific code change (e.g. "Change line 117 from X to Y") not a generic suggestion.
+6. Output ONLY a valid raw JSON object. No markdown fences, no extra text.
 
-Required JSON:
+EXAMPLE of good vs bad recommended_fix:
+BAD:  "Change the error message to not mention 5ms."
+GOOD: "On line 117 of index.js, change: deploymentTarget.healthCheck.timeout / 1000
+       to: deploymentTarget.healthCheck.timeout
+       The config stores timeout in milliseconds already, so dividing by 1000 incorrectly converts it to microseconds."
+
+Required JSON output:
 {
   "status": "failed",
-  "error_type": "<short category e.g. Health Check Timeout / Module Not Found / Syntax Error>",
+  "error_type": "<short category: Health Check Timeout / Syntax Error / Module Not Found / etc.>",
   "severity": "High|Medium|Low",
-  "failure_summary": "<1-2 clear sentences: what failed and where>",
-  "root_cause": "<technical explanation citing the actual code or config value that caused the failure>",
-  "evidence": "<exact lines from the build log that show the error>",
-  "affected_file": "<file path from stack trace e.g. backend/demo-config.js>",
-  "source_context": "<the specific lines of code around the failure, quoted from the snippet below>",
-  "explanation": "<natural language step-by-step: what the code does, why this specific line or value caused the failure>",
-  "recommended_fix": "<natural language fix: quote the broken line, show exactly what to change it to, and explain why>",
-  "why_fix_works": "<explain in plain English why changing that specific value/line resolves the root cause>",
+  "failure_summary": "<1-2 sentences: what failed, which file, which line>",
+  "root_cause": "<the actual buggy expression or value — cite the specific line number and code>",
+  "evidence": "<exact lines from the build log showing the failure>",
+  "affected_file": "<file path, e.g. index.js>",
+  "source_context": "<the specific lines from the code snippet that show the bug, not the throw>",
+  "explanation": "<natural language: trace how the bad value was computed and why it causes the failure>",
+  "recommended_fix": "<concrete fix: quote the broken line and show exactly what to change it to>",
+  "why_fix_works": "<plain English: why this change resolves the root cause>",
   "confidence": "High|Medium|Low"
 }
 
-=== WORKFLOW FAILURE LOG ===
+=== GITHUB ACTIONS FAILURE LOG ===
 ${logContent.slice(0, 3000)}
 
-=== SOURCE FILE WITH FAILING LINE ANNOTATED ===
+=== SOURCE FILE (>>> = line where exception was RAISED, look above it for the bug) ===
 ${sourceContext}
 `;
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 45000);
-
-            const ollamaRes = await fetch(`${OLLAMA_URL}/api/generate`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                signal: controller.signal,
-                body: JSON.stringify({ model: PRIMARY_MODEL, prompt: systemPrompt, stream: false })
+            const ollamaRes = await enqueueGraniteCall(async () => {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 120000);
+                try {
+                    return await fetch(`${OLLAMA_URL}/api/generate`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        signal: controller.signal,
+                        body: JSON.stringify({ model: PRIMARY_MODEL, prompt: systemPrompt, stream: false })
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
             });
-            clearTimeout(timeoutId);
 
             if (ollamaRes.ok) {
                 const data = await ollamaRes.json();
@@ -536,7 +608,17 @@ ${sourceContext}
                 const cleanedJson = responseText
                     .replace(/^```json\s*/i, "").replace(/^```\s*/, "").replace(/\s*```$/, "").trim();
                 try {
-                    aiResult = JSON.parse(cleanedJson);
+                    // Sanitize control characters inside JSON string values before parsing
+                    const sanitized = cleanedJson
+                        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, " ") // strip bad control chars
+                        .replace(/\n/g, "\\n")                            // escape raw newlines inside strings
+                        .replace(/\r/g, "\\r")                            // escape raw carriage returns
+                        .replace(/\t/g, "\\t");                           // escape raw tabs
+                    // But only if it's not already valid JSON
+                    let parsed = null;
+                    try { parsed = JSON.parse(cleanedJson); }
+                    catch { parsed = JSON.parse(sanitized); }
+                    aiResult = parsed;
                     console.log(`✅ Granite LLM response parsed for run #${runIdStr}`);
                 } catch (e) {
                     console.warn("Could not parse Granite JSON output:", e.message, "Raw:", cleanedJson.slice(0, 200));
@@ -1046,7 +1128,7 @@ ${sourceContext}
 `;
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 45000);
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
 
             const ollamaRes = await fetch(`${OLLAMA_URL}/api/generate`, {
                 method: "POST",
