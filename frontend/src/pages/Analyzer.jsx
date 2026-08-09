@@ -33,14 +33,15 @@ import api from "../services/api";
 import { supabase } from "../services/supabase";
 
 function Dashboard() {
-    // Auth State (Supabase / GitHub OAuth)
+    // Auth State (Supabase / GitHub OAuth or Manual PAT)
     const [session, setSession] = useState(null);
     const [userProfile, setUserProfile] = useState(null);
-    const [githubToken, setGithubToken] = useState(() => localStorage.getItem("gh_token") || "");
+    const [githubToken, setGithubToken] = useState(() => localStorage.getItem("gh_token") || localStorage.getItem("gh_pat") || "");
 
     // Repository State
     const [owner, setOwner] = useState(() => localStorage.getItem("gh_owner") || "AidonPatrao");
     const [repo, setRepo] = useState(() => localStorage.getItem("gh_repo") || "ai-llm-rag-analyzer");
+    const [patInput, setPatInput] = useState(() => localStorage.getItem("gh_pat") || "");
     const [showConfig, setShowConfig] = useState(false);
 
     // Auto-discovered user repositories list
@@ -149,7 +150,18 @@ function Dashboard() {
         setSession(null);
         setUserProfile(null);
         setGithubToken("");
+        setPatInput("");
         window.location.href = window.location.origin;
+    };
+
+    // Save PAT token manually
+    const savePatToken = () => {
+        if (patInput) {
+            localStorage.setItem("gh_pat", patInput);
+            setGithubToken(patInput);
+            fetchDashboardData();
+            fetchUserRepositories();
+        }
     };
 
     // Helper for API headers
@@ -328,11 +340,33 @@ function Dashboard() {
 
                     <button
                         onClick={handleGitHubLogin}
-                        className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-base shadow-xl shadow-purple-950/60 flex items-center justify-center gap-3 transition-all hover:scale-[1.02] active:scale-98"
+                        className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-base shadow-xl shadow-purple-950/60 flex items-center justify-center gap-3 transition-all hover:scale-[1.02] active:scale-98 mb-4"
                     >
                         <Github className="w-5 h-5 fill-current" />
                         <span>Sign in with GitHub</span>
                     </button>
+
+                    {/* Manual PAT Input Option */}
+                    <div className="pt-4 border-t border-slate-800/80 text-left">
+                        <label className="block text-xs font-mono text-slate-400 mb-1 flex items-center gap-1">
+                            <Key className="w-3.5 h-3.5 text-purple-400" /> Or Enter GitHub PAT Token (Optional)
+                        </label>
+                        <div className="flex gap-2">
+                            <input
+                                type="password"
+                                value={patInput}
+                                onChange={(e) => setPatInput(e.target.value)}
+                                placeholder="ghp_..."
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
+                            />
+                            <button
+                                onClick={savePatToken}
+                                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-xl shadow"
+                            >
+                                Save PAT
+                            </button>
+                        </div>
+                    </div>
 
                     <div className="mt-8 pt-6 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono text-slate-500">
                         <span>Supabase + GitHub OAuth</span>
@@ -362,7 +396,7 @@ function Dashboard() {
                                     onClick={() => setShowConfig(!showConfig)}
                                     className="text-[10px] text-slate-300 hover:text-white px-2 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 flex items-center gap-1 transition-all"
                                 >
-                                    <ListFilter className="w-3 h-3 text-purple-400" /> Select Repo
+                                    <ListFilter className="w-3 h-3 text-purple-400" /> Select Repo / PAT
                                 </button>
                             </div>
                         </div>
@@ -397,35 +431,57 @@ function Dashboard() {
                             </button>
                         </div>
 
-                        {/* HIGH VISIBILITY LOGOUT BUTTON */}
+                        {/* HIGH VISIBILITY BRIGHT RED LOG OUT BUTTON */}
                         <div className="flex items-center gap-3 border-l border-slate-800 pl-4">
                             {userProfile?.user_metadata?.avatar_url && (
                                 <img src={userProfile.user_metadata.avatar_url} alt="Profile" className="w-7 h-7 rounded-full border border-purple-500/40" />
                             )}
                             <button 
                                 onClick={handleFullLogout} 
-                                className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-red-950/50 hover:scale-105 active:scale-95" 
+                                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold flex items-center gap-2 transition-all shadow-lg shadow-red-950/60 hover:scale-105 active:scale-95 cursor-pointer" 
                                 title="Click to log out and open Sign In screen"
                             >
-                                <LogOut className="w-3.5 h-3.5" />
+                                <LogOut className="w-4 h-4" />
                                 <span>Log Out / Sign In</span>
                             </button>
                         </div>
                     </div>
                 </div>
 
-                {/* Automatic Repository Selector Modal / Drawer */}
+                {/* Automatic Repository Selector & PAT Config Drawer */}
                 {showConfig && (
                     <div className="bg-slate-900 border-b border-purple-500/30 p-6 animate-in slide-in-from-top duration-200 shadow-2xl">
                         <div className="max-w-7xl mx-auto space-y-4">
                             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                                 <div>
                                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                                        <FolderGit2 className="w-4 h-4 text-purple-400" /> Select GitHub Repository
+                                        <FolderGit2 className="w-4 h-4 text-purple-400" /> Select GitHub Repository & Token Settings
                                     </h3>
-                                    <p className="text-xs text-slate-400 mt-0.5">Pick any repository from your authenticated GitHub account.</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">Pick any repository or update your GitHub PAT Token (`ghp_...`).</p>
                                 </div>
                                 <button onClick={() => setShowConfig(false)} className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded">Close</button>
+                            </div>
+
+                            {/* PAT Token Configuration Bar */}
+                            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-wrap items-end gap-3">
+                                <div className="flex-1 min-w-[240px]">
+                                    <label className="block text-xs font-mono text-slate-400 mb-1 flex items-center gap-1">
+                                        <Key className="w-3.5 h-3.5 text-purple-400" /> GitHub Personal Access Token (PAT)
+                                    </label>
+                                    <input
+                                        type="password"
+                                        value={patInput}
+                                        onChange={(e) => setPatInput(e.target.value)}
+                                        placeholder="ghp_..."
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
+                                    />
+                                </div>
+                                <button
+                                    onClick={savePatToken}
+                                    className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-lg shadow"
+                                >
+                                    Update PAT Token
+                                </button>
                             </div>
 
                             {/* Discovered Repository Cards */}
