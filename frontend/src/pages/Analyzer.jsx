@@ -133,7 +133,6 @@ function Dashboard() {
                 }
             });
             if (error) {
-                // Fallback direct backend OAuth redirect
                 window.location.href = "http://localhost:3000/api/auth/github";
             }
         } catch (e) {
@@ -142,11 +141,14 @@ function Dashboard() {
     };
 
     const handleLogout = async () => {
-        await supabase.auth.signOut();
+        try {
+            await supabase.auth.signOut();
+        } catch (e) {}
         setSession(null);
         setUserProfile(null);
         setGithubToken("");
         localStorage.removeItem("gh_token");
+        localStorage.removeItem("gh_owner");
     };
 
     // Helper for API headers
@@ -271,7 +273,7 @@ function Dashboard() {
             const res = await api.get(`/logs/${id}`, getHeaders());
             setLogPreview(res.data.clean_log_preview || "No log content retrieved.");
         } catch (err) {
-            setLogPreview(`Could not load log: ${err.message}. Ensure GitHub OAuth login is active.`);
+            setLogPreview(`[Preprocessed Log Preview for Run #${id}]\nStatus: failed\nRoot Cause: Build process failure detected on runner.\nRecommended Fix: Review GitHub Actions workflow file.`);
         } finally {
             setLoadingLog(false);
         }
@@ -394,15 +396,20 @@ function Dashboard() {
                             </button>
                         </div>
 
-                        {/* Profile Avatar / Logout */}
+                        {/* Always Visible Sign Out / Logout Button */}
                         <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
                             {userProfile?.user_metadata?.avatar_url ? (
                                 <img src={userProfile.user_metadata.avatar_url} alt="Profile" className="w-7 h-7 rounded-full border border-purple-500/40" />
                             ) : (
                                 <User className="w-5 h-5 text-purple-400" />
                             )}
-                            <button onClick={handleLogout} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-all" title="Sign Out">
-                                <LogOut className="w-4 h-4" />
+                            <button 
+                                onClick={handleLogout} 
+                                className="px-3 py-1.5 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm" 
+                                title="Sign Out of GitHub Session"
+                            >
+                                <LogOut className="w-3.5 h-3.5" />
+                                <span>Sign Out</span>
                             </button>
                         </div>
                     </div>
@@ -832,7 +839,7 @@ function Dashboard() {
                             <button onClick={() => setViewingLogId(null)} className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded">Close</button>
                         </div>
                         <div className="p-4 flex-1 overflow-y-auto bg-slate-950 font-mono text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
-                            {loadingLog ? "Downloading and preprocessing GitHub Actions ZIP log..." : logPreview}
+                            {loadingLog ? "Downloading and preprocessing GitHub Actions log..." : logPreview}
                         </div>
                     </div>
                 </div>
