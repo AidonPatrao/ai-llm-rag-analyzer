@@ -188,6 +188,28 @@ async function saveIncidentRecord(incident, repoName) {
     return record;
 }
 
+async function deleteIncidentRecord(runId) {
+    const runIdStr = String(runId);
+    runAnalysisCache.delete(runIdStr);
+    inMemoryIncidents = inMemoryIncidents.filter(inc => String(inc.run_id) !== runIdStr);
+
+    if (supabase) {
+        try {
+            await supabase.from("incidents").delete().eq("run_id", runIdStr);
+        } catch (e) {
+            console.warn(`Failed to delete run #${runIdStr} from Supabase:`, e.message);
+        }
+    }
+
+    if (dbPool) {
+        try {
+            await dbPool.query("DELETE FROM incidents WHERE run_id = $1", [runIdStr]);
+        } catch (e) {
+            console.warn(`Failed to delete run #${runIdStr} from PostgreSQL:`, e.message);
+        }
+    }
+}
+
 // --- RAG Knowledge Base ---
 const RAG_KNOWLEDGE_BASE = [
     {
@@ -419,8 +441,8 @@ async function autoAnalyzeRun(runId, req, force = false) {
         const existing = await getExistingAnalysis(runIdStr);
         if (existing) return existing;
     } else {
-        runAnalysisCache.delete(runIdStr);
-        console.log(`🔄 Force re-analysis for run #${runIdStr} — cache cleared`);
+        await deleteIncidentRecord(runIdStr);
+        console.log(`🔄 Force re-analysis for run #${runIdStr} — cache & databases cleared`);
     }
 
     // In-flight deduplication: if already being analyzed, wait for it
@@ -1086,12 +1108,29 @@ async function handleLogAnalysis(req, res) {
         const ragContext = retrieveRAGContext(logContent);
 
         // Extract failing source file from stack trace
-        const sourceFilePath = extractSourceFilePath(logContent);
+        const { filePath: sourceFilePath, lineNumber: srcLine, colNumber: srcCol } = extractSourceFilePath(logContent);
         let sourceContext = "No application source file was identified.";
         if (sourceFilePath) {
-            const rawSource = await fetchSourceCodeFromGitHub(sourceFilePath, req);
-            if (rawSource) {
-                sourceContext = `FILE: ${sourceFilePath}\nSOURCE CODE:\n${rawSource.slice(0, 2000)}`;
+            const pathsToTry = [
+                sourceFilePath,
+                `src/${sourceFilePath}`,
+                `backend/${sourceFilePath}`,
+                `frontend/src/${sourceFilePath}`
+            ];
+            let fetchResult = null, resolvedPath = null;
+            for (const p of pathsToTry) {
+                fetchResult = await fetchSourceCodeFromGitHub(p, req, srcLine);
+                if (fetchResult) { resolvedPath = p; break; }
+            }
+            if (fetchResult) {
+                sourceContext = [
+                    `FILE: ${resolvedPath}`,
+                    srcLine ? `FAILING LINE: ${srcLine}${srcCol ? `:${srcCol}` : ""}` : "",
+                    "",
+                    fetchResult.annotatedSnippet
+                ].filter(Boolean).join("\n");
+            } else {
+                sourceContext = `FILE: ${sourceFilePath}${srcLine ? ` (line ${srcLine})` : ""}\nFile not found in repo.`;
             }
         }
 
@@ -1210,11 +1249,33 @@ app.post("/analyze", upload.single("file"), handleLogAnalysis);
 app.post("/api/analyze", upload.single("file"), handleLogAnalysis);
 
 // Clear cached analysis for a specific run (forces fresh Granite re-analysis)
-app.delete("/cache/:id", (req, res) => {
+app.delete("/cache/:id", async (req, res) => {
     const runId = String(req.params.id);
     const wasInCache = runAnalysisCache.has(runId);
-    runAnalysisCache.delete(runId);
-    res.json({ success: true, runId, cleared: wasInCache, message: `Cache cleared for run #${runId}. Next analysis call will use Granite LLM.` });
+    await deleteIncidentRecord(runId);
+    res.json({ success: true, runId, cleared: wasInCache, message: `Cache cleared for run #${runId}. Next analysis call will fetch fresh details and run Granite LLM.` });
+});
+
+// Clear all caches and database incident entries (completely wipe all cached analysis results)
+app.delete("/cache-all", async (req, res) => {
+    try {
+        runAnalysisCache.clear();
+        inMemoryIncidents = [];
+
+        if (supabase) {
+            const { error } = await supabase.from("incidents").delete().neq("status", "non-existent-status-to-delete-all");
+            if (error) throw error;
+        }
+
+        if (dbPool) {
+            await dbPool.query("TRUNCATE TABLE incidents");
+        }
+
+        console.log("🧹 Entire DevOps analysis cache & database wiped cleanly.");
+        res.json({ success: true, message: "Entire analysis database and cache wiped successfully. Refreshing the dashboard will trigger a fresh analysis for all runs." });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 app.listen(PORT, () => {

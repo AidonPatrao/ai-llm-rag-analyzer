@@ -81,6 +81,8 @@ function Dashboard() {
     const [logPreview, setLogPreview] = useState("");
     const [loadingLog, setLoadingLog] = useState(false);
 
+    const [reanalyzingRuns, setReanalyzingRuns] = useState({});
+
     const fileInputRef = useRef(null);
 
     // Parse URL params for OAuth callback tokens
@@ -313,6 +315,43 @@ function Dashboard() {
             setLogPreview(`[Preprocessed Log Preview for Run #${id}]\nStatus: failed\nRoot Cause: Build process failure detected on runner.\nRecommended Fix: Review GitHub Actions workflow file.`);
         } finally {
             setLoadingLog(false);
+        }
+    };
+
+    const handleReanalyzeRun = async (runId) => {
+        setReanalyzingRuns(prev => ({ ...prev, [runId]: true }));
+        try {
+            const config = getHeaders();
+            const res = await api.get(`/analyze/${runId}?force=true`, config);
+            
+            const freshAnalysis = {
+                status: res.data.status,
+                error_type: res.data.errorType || res.data.error_type,
+                severity: res.data.severity,
+                failure_summary: res.data.failureSummary || res.data.failure_summary,
+                root_cause: res.data.rootCause || res.data.root_cause,
+                evidence: res.data.evidence,
+                affected_file: res.data.affected_file || res.data.affectedFile,
+                source_context: res.data.source_context || res.data.sourceContext,
+                explanation: res.data.explanation,
+                recommended_fix: res.data.recommended_fix || res.data.recommendedFix,
+                why_fix_works: res.data.why_fix_works || res.data.whyFixWorks,
+                confidence: res.data.confidence
+            };
+
+            setRuns(prevRuns => prevRuns.map(run => {
+                if (run.id === runId) {
+                    return { ...run, ai_analysis: freshAnalysis };
+                }
+                return run;
+            }));
+            
+            setExpandedRunId(runId);
+        } catch (err) {
+            console.error("Re-analyze Error:", err);
+            alert(`Re-analysis failed: ${err.response?.data?.message || err.message}`);
+        } finally {
+            setReanalyzingRuns(prev => ({ ...prev, [runId]: false }));
         }
     };
 
@@ -683,6 +722,21 @@ function Dashboard() {
                                                         >
                                                             <Terminal className="w-3.5 h-3.5" /> Log Trace
                                                         </button>
+                                                        {run.conclusion !== "success" && (
+                                                            <button
+                                                                onClick={() => handleReanalyzeRun(run.id)}
+                                                                disabled={reanalyzingRuns[run.id]}
+                                                                className={`px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                                                                    reanalyzingRuns[run.id]
+                                                                        ? "bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed"
+                                                                        : "bg-slate-900 hover:bg-slate-800 border-slate-700 text-amber-300 hover:text-amber-200"
+                                                                }`}
+                                                                title="Force Granite to re-analyze this failure from scratch"
+                                                            >
+                                                                <RefreshCw className={`w-3.5 h-3.5 ${reanalyzingRuns[run.id] ? "animate-spin text-slate-500" : "text-amber-400"}`} />
+                                                                <span>{reanalyzingRuns[run.id] ? "Analyzing..." : "Re-analyze"}</span>
+                                                            </button>
+                                                        )}
                                                         <button
                                                             onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
                                                             className="px-3 py-1.5 rounded-lg bg-purple-900/40 hover:bg-purple-900/80 border border-purple-500/30 text-purple-200 text-xs font-semibold flex items-center gap-1"
