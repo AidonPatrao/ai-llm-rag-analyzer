@@ -512,15 +512,20 @@ ${sourceContext}
     }
 }
 
-// --- Endpoints ---
+// --- Endpoints (Guaranteed 200 OK to prevent console 500 errors) ---
 app.get("/analyze/:id", async (req, res) => {
-    const aiAnalysis = await autoAnalyzeRun(req.params.id, req);
-    res.json({
-        runId: req.params.id,
-        affectedFile: aiAnalysis.affected_file || "N/A",
-        sourceContextIncluded: true,
-        graniteAnalysis: aiAnalysis
-    });
+    try {
+        const aiAnalysis = await autoAnalyzeRun(req.params.id, req);
+        res.json({
+            success: true,
+            runId: req.params.id,
+            affectedFile: aiAnalysis.affected_file || "N/A",
+            sourceContextIncluded: true,
+            graniteAnalysis: aiAnalysis
+        });
+    } catch (err) {
+        res.json({ success: false, error: err.message });
+    }
 });
 
 app.get("/analyze-latest", async (req, res) => {
@@ -528,10 +533,11 @@ app.get("/analyze-latest", async (req, res) => {
         const data = await fetchGitHubAPI("/actions/runs?status=completed&per_page=10", req);
         const failedRun = (data.workflow_runs || []).find(r => r.conclusion === "failure");
         if (!failedRun) {
-            return res.json({ message: "No failed workflow found" });
+            return res.json({ success: true, message: "No failed workflow found" });
         }
         const aiAnalysis = await autoAnalyzeRun(failedRun.id, req);
         res.json({
+            success: true,
             runId: failedRun.id,
             workflow: failedRun.name,
             branch: failedRun.head_branch,
@@ -539,7 +545,7 @@ app.get("/analyze-latest", async (req, res) => {
             analysis: aiAnalysis
         });
     } catch (err) {
-        res.status(500).json({ error: "Failed to analyze latest workflow" });
+        res.json({ success: false, error: err.message });
     }
 });
 
@@ -608,7 +614,7 @@ app.get("/api/github/user-repos", async (req, res) => {
 
         res.json({ success: true, count: repos.length, repos });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message, repos: [] });
+        res.json({ success: false, error: err.message, repos: [] });
     }
 });
 
@@ -639,7 +645,7 @@ app.get("/github", async (req, res) => {
 
         res.json({ success: true, count: runs.length, runs });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message, runs: [] });
+        res.json({ success: false, error: err.message, runs: [] });
     }
 });
 
@@ -666,7 +672,7 @@ app.get("/failed-builds", async (req, res) => {
 
         res.json({ success: true, count: failedRuns.length, failed_builds: failedRuns });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message, failed_builds: [] });
+        res.json({ success: false, error: err.message, failed_builds: [] });
     }
 });
 
@@ -677,7 +683,7 @@ app.get("/failed-builds/:id", async (req, res) => {
         const aiAnalysis = await autoAnalyzeRun(req.params.id, req);
         res.json({ success: true, run: data, ai_analysis: aiAnalysis });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        res.json({ success: false, error: err.message });
     }
 });
 
@@ -701,7 +707,7 @@ app.get("/metrics", async (req, res) => {
             success_rate: `${successRate}%`
         });
     } catch (err) {
-        res.status(500).json({
+        res.json({
             success: false,
             total_runs: 0,
             success_rate: "100%",
@@ -728,7 +734,7 @@ app.get("/health-status", async (req, res) => {
             } : null
         });
     } catch (err) {
-        res.status(500).json({ success: false, health: "Unknown", error: err.message });
+        res.json({ success: false, health: "Unknown", error: err.message });
     }
 });
 
@@ -748,7 +754,7 @@ app.get("/risk-analysis", async (req, res) => {
             recommendation: failures >= 2 ? "Hold deployment. AI diagnostic running on recent build failures." : "Safe to proceed with deployment."
         });
     } catch (err) {
-        res.status(500).json({ success: false, risk_level: "Low Risk", error: err.message });
+        res.json({ success: false, risk_level: "Low Risk", error: err.message });
     }
 });
 
@@ -770,7 +776,7 @@ app.get("/devops-summary", async (req, res) => {
             risk: riskData.status === "fulfilled" ? (riskData.value.workflow_runs?.filter(r => r.conclusion === "failure").length >= 2 ? "High Risk" : "Low Risk") : "Low Risk"
         });
     } catch (err) {
-        res.status(500).json({ success: false, error: err.message });
+        res.json({ success: false, error: err.message });
     }
 });
 
