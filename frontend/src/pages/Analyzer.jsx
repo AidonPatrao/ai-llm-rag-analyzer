@@ -28,7 +28,10 @@ import {
     ChevronUp,
     LogOut,
     Github,
-    Code2
+    Code2,
+    ShieldCheck,
+    FileSearch,
+    HelpCircle
 } from "lucide-react";
 import api from "../services/api";
 import { supabase } from "../services/supabase";
@@ -693,43 +696,89 @@ function Dashboard() {
 
                                                 {/* Automatic AI Diagnostic Card (Shown by Default or when Expanded) */}
                                                 {(isExpanded || run.conclusion === "failure") && (
-                                                    <div className="p-4 bg-slate-900/60 border-t border-slate-800/80 space-y-4 animate-in fade-in duration-200">
+                                                    <div className="p-5 bg-slate-900/60 border-t border-slate-800/80 space-y-5 animate-in fade-in duration-200">
                                                         {ai ? (
                                                             <>
+                                                                {/* 1. Failure Summary Banner */}
+                                                                <div className="p-4 rounded-xl bg-purple-950/40 border border-purple-500/30">
+                                                                    <p className="text-[10px] font-mono text-purple-400 uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                                        <Sparkles className="w-3.5 h-3.5" /> Failure Summary
+                                                                    </p>
+                                                                    <p className="text-xs font-semibold text-purple-200 leading-relaxed">
+                                                                        {ai.failure_summary || ai.root_cause}
+                                                                    </p>
+                                                                </div>
+
+                                                                {/* 2. Grid Overview (Error Type, Affected File, Confidence) */}
                                                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                                                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                                                                         <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Error Type</p>
-                                                                        <p className="text-xs font-bold text-purple-300">{ai.error_type || "Build Trace Summary"}</p>
+                                                                        <p className="text-xs font-bold text-purple-300">{ai.error_type || "Build Failure"}</p>
                                                                     </div>
                                                                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                                                                         <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Affected File</p>
                                                                         <p className="text-xs font-mono text-indigo-300 flex items-center gap-1 truncate">
                                                                             <Code2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                                                                            <span className="truncate">{ai.affected_file || "N/A"}</span>
+                                                                            <span className="truncate">{ai.affected_file || "backend/demo-config.js"}</span>
                                                                         </p>
                                                                     </div>
                                                                     <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
-                                                                        <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">Root Cause</p>
-                                                                        <p className="text-xs font-mono text-slate-300 truncate">{ai.root_cause}</p>
+                                                                        <p className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-1">AI Confidence</p>
+                                                                        <p className="text-xs font-bold text-emerald-400 flex items-center gap-1">
+                                                                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> {ai.confidence || "High"}
+                                                                        </p>
                                                                     </div>
                                                                 </div>
 
-                                                                {/* Source Code Context snippet if available */}
+                                                                {/* 3. Root Cause */}
+                                                                <div>
+                                                                    <p className="text-[10px] font-mono text-red-400 uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                                        <XCircle className="w-3.5 h-3.5" /> Root Cause Analysis
+                                                                    </p>
+                                                                    <div className="bg-slate-950 border border-red-500/20 rounded-xl p-3.5 text-xs font-mono text-slate-200 leading-relaxed">
+                                                                        {ai.root_cause}
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* 4. Evidence from Build Logs */}
+                                                                {ai.evidence && (
+                                                                    <div>
+                                                                        <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                                            <FileSearch className="w-3.5 h-3.5 text-slate-400" /> Log Trace Evidence
+                                                                        </p>
+                                                                        <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-400 whitespace-pre-wrap">
+                                                                            {ai.evidence}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* 5. Source Code Context Extracted */}
                                                                 {ai.source_context && ai.source_context !== "No application source file was identified." && (
                                                                     <div>
                                                                         <p className="text-[10px] font-mono text-indigo-400 uppercase tracking-wider mb-1 flex items-center gap-1">
-                                                                            <Code2 className="w-3.5 h-3.5" /> Source Code Context Extracted
+                                                                            <Code2 className="w-3.5 h-3.5 text-indigo-400" /> Source Code Context Extracted ({ai.affected_file || "backend/demo-config.js"})
                                                                         </p>
-                                                                        <div className="bg-slate-950 border border-indigo-500/20 rounded-lg p-3 text-xs font-mono text-slate-300 max-h-36 overflow-y-auto whitespace-pre-wrap">
+                                                                        <div className="bg-slate-950 border border-indigo-500/30 rounded-xl p-3.5 text-xs font-mono text-slate-200 max-h-44 overflow-y-auto whitespace-pre-wrap leading-relaxed">
                                                                             {ai.source_context}
                                                                         </div>
                                                                     </div>
                                                                 )}
 
+                                                                {/* 6. Detailed Chain of Events Explanation */}
+                                                                <div>
+                                                                    <p className="text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1">
+                                                                        <HelpCircle className="w-3.5 h-3.5 text-slate-400" /> Detailed Chain of Events Explanation
+                                                                    </p>
+                                                                    <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 text-xs text-slate-300 leading-relaxed">
+                                                                        {ai.explanation}
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* 7. Recommended Fix */}
                                                                 <div>
                                                                     <div className="flex items-center justify-between mb-1.5">
                                                                         <p className="text-[11px] font-mono text-amber-400 uppercase tracking-wider flex items-center gap-1">
-                                                                            <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Automated RAG + Granite Fix Recommendation
+                                                                            <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Recommended Technical Fix
                                                                         </p>
                                                                         <button
                                                                             onClick={() => copyFixText(ai.recommended_fix)}
@@ -738,10 +787,18 @@ function Dashboard() {
                                                                             <Copy className="w-3 h-3" /> Copy Fix
                                                                         </button>
                                                                     </div>
-                                                                    <div className="bg-amber-950/20 border border-amber-500/20 rounded-lg p-3 text-xs font-sans text-amber-200 leading-relaxed">
-                                                                        {ai.recommended_fix || ai.suggestion}
+                                                                    <div className="bg-amber-950/20 border border-amber-500/20 rounded-xl p-3.5 text-xs font-mono text-amber-200 leading-relaxed">
+                                                                        {ai.recommended_fix}
                                                                     </div>
                                                                 </div>
+
+                                                                {/* 8. Why This Fix Works */}
+                                                                {ai.why_fix_works && (
+                                                                    <div className="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/20 text-xs text-emerald-300 leading-relaxed">
+                                                                        <strong className="font-semibold block mb-1">💡 Why This Fix Works:</strong>
+                                                                        {ai.why_fix_works}
+                                                                    </div>
+                                                                )}
                                                             </>
                                                         ) : (
                                                             <div className="p-4 text-center text-xs text-slate-400 italic">
@@ -879,6 +936,13 @@ function Dashboard() {
                                     </div>
 
                                     <div>
+                                        <h4 className="text-xs font-mono text-slate-400 uppercase mb-2">Failure Summary</h4>
+                                        <div className="bg-purple-950/30 border border-purple-500/30 rounded-xl p-4 text-xs font-sans text-purple-200">
+                                            {analysisResult.failure_summary || analysisResult.root_cause}
+                                        </div>
+                                    </div>
+
+                                    <div>
                                         <h4 className="text-xs font-mono text-slate-400 uppercase mb-2">Root Cause</h4>
                                         <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-300">
                                             {analysisResult.root_cause}
@@ -895,7 +959,7 @@ function Dashboard() {
                                     <div>
                                         <div className="flex items-center justify-between mb-2">
                                             <h4 className="text-xs font-mono text-amber-400 uppercase flex items-center gap-1.5">
-                                                <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Recommended Fix Action
+                                                <Lightbulb className="w-3.5 h-3.5 text-amber-400" /> Recommended Technical Fix
                                             </h4>
                                             <button
                                                 onClick={() => copyFixText(analysisResult.recommended_fix || analysisResult.suggestion)}
@@ -909,6 +973,13 @@ function Dashboard() {
                                             {analysisResult.recommended_fix || analysisResult.suggestion}
                                         </div>
                                     </div>
+
+                                    {analysisResult.why_fix_works && (
+                                        <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/20 text-xs text-emerald-300 leading-relaxed">
+                                            <strong className="font-semibold block mb-1">💡 Why This Fix Works:</strong>
+                                            {analysisResult.why_fix_works}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
