@@ -235,6 +235,34 @@ app.get("/api/health", (req, res) => {
     });
 });
 
+// GET /api/github/user-repos: Fetch list of repositories for given owner/token
+app.get("/api/github/user-repos", async (req, res) => {
+    try {
+        const { owner, pat } = getRepoConfig(req);
+        const headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "DevOps-AI-Log-Analyzer"
+        };
+        if (pat) headers["Authorization"] = `Bearer ${pat}`;
+
+        let url = pat ? "https://api.github.com/user/repos?per_page=100&sort=updated" : `https://api.github.com/users/${owner}/repos?per_page=100&sort=updated`;
+
+        const response = await axios.get(url, { headers });
+        const repos = (response.data || []).map(r => ({
+            id: r.id,
+            name: r.name,
+            full_name: r.full_name,
+            owner: r.owner?.login || owner,
+            is_private: r.private,
+            updated_at: r.updated_at
+        }));
+
+        res.json({ success: true, count: repos.length, repos });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message, repos: [] });
+    }
+});
+
 // GET /github: Latest 5 workflow runs
 app.get("/github", async (req, res) => {
     try {
