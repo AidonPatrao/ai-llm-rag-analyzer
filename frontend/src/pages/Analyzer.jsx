@@ -154,15 +154,6 @@ function Dashboard() {
         window.location.href = window.location.origin;
     };
 
-    // Save PAT token manually
-    const savePatToken = () => {
-        if (patInput) {
-            localStorage.setItem("gh_pat", patInput);
-            setGithubToken(patInput);
-            fetchDashboardData();
-            fetchUserRepositories();
-        }
-    };
 
     // Helper for API headers
     const getHeaders = (overrideOwner = owner, overrideRepo = repo, overridePat = githubToken) => ({
@@ -347,7 +338,7 @@ function Dashboard() {
                     </button>
 
                     {/* Manual PAT Input Option */}
-                    <div className="pt-4 border-t border-slate-800/80 text-left">
+                    {/* <div className="pt-4 border-t border-slate-800/80 text-left">
                         <label className="block text-xs font-mono text-slate-400 mb-1 flex items-center gap-1">
                             <Key className="w-3.5 h-3.5 text-purple-400" /> Or Enter GitHub PAT Token (Optional)
                         </label>
@@ -359,14 +350,8 @@ function Dashboard() {
                                 placeholder="ghp_..."
                                 className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500"
                             />
-                            <button
-                                onClick={savePatToken}
-                                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold rounded-xl shadow"
-                            >
-                                Save PAT
-                            </button>
                         </div>
-                    </div>
+                    </div> */}
 
                     <div className="mt-8 pt-6 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono text-slate-500">
                         <span>Supabase + GitHub OAuth</span>
