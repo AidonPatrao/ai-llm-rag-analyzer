@@ -5,19 +5,24 @@ import axios from "axios";
 import dotenv from "dotenv";
 import AdmZip from "adm-zip";
 import pg from "pg";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configuration default variables
+// Environment Configuration
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
 const GITHUB_PAT = process.env.GITHUB_PAT || process.env.GITHUB_TOKEN || "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER || "AidonPatrao";
 const GITHUB_REPO = process.env.GITHUB_REPO || "ai-llm-rag-analyzer";
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
 const PRIMARY_MODEL = process.env.GRANITE_MODEL || "granite4:3b";
 const DATABASE_URL = process.env.DATABASE_URL || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 
 app.use(cors());
 app.use(express.json({ limit: "15mb" }));
@@ -25,10 +30,20 @@ app.use(express.urlencoded({ extended: true, limit: "15mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- PostgreSQL Database Initialization ---
+// --- Supabase & PostgreSQL Initialization ---
 let dbPool = null;
+let supabase = null;
 let inMemoryIncidents = [];
-let runAnalysisCache = new Map(); // Cache AI analysis for run_ids to avoid redundant LLM calls
+let runAnalysisCache = new Map();
+
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+    try {
+        supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        console.log("⚡ Supabase Client initialized.");
+    } catch (err) {
+        console.warn("⚠️ Supabase initialization warning:", err.message);
+    }
+}
 
 if (DATABASE_URL) {
     try {
@@ -51,9 +66,9 @@ if (DATABASE_URL) {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `).then(() => {
-            console.log("🐘 PostgreSQL DB connected & `incidents` table verified.");
+            console.log("🐘 PostgreSQL / Supabase DB connected & `incidents` table verified.");
         }).catch(err => {
-            console.warn("⚠️ PostgreSQL initialization warning:", err.message);
+            console.warn("⚠️ Database query warning:", err.message);
         });
     } catch (e) {
         console.warn("⚠️ Could not create PostgreSQL pool. Using fallback storage.");
@@ -61,9 +76,15 @@ if (DATABASE_URL) {
 }
 
 function getRepoConfig(req) {
+    const authHeader = req?.headers?.authorization;
+    let bearerToken = "";
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+        bearerToken = authHeader.substring(7);
+    }
+
     const owner = req?.headers?.["x-github-owner"] || GITHUB_OWNER;
     const repo = req?.headers?.["x-github-repo"] || GITHUB_REPO;
-    const pat = req?.headers?.["x-github-pat"] || GITHUB_PAT;
+    const pat = bearerToken || req?.headers?.["x-github-pat"] || GITHUB_PAT;
     return { owner, repo, pat };
 }
 
@@ -84,6 +105,12 @@ async function saveIncidentRecord(incident, repoName) {
     inMemoryIncidents.unshift(record);
     runAnalysisCache.set(record.run_id, record);
 
+    if (supabase) {
+        try {
+            await supabase.from("incidents").insert([record]);
+        } catch (e) {}
+    }
+
     if (dbPool) {
         try {
             await dbPool.query(
@@ -91,9 +118,7 @@ async function saveIncidentRecord(incident, repoName) {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
                 [record.run_id, record.repo, record.status, record.error_type, record.severity, record.root_cause, record.explanation, record.recommended_fix]
             );
-        } catch (err) {
-            console.warn("Could not save incident to PostgreSQL:", err.message);
-        }
+        } catch (err) {}
     }
     return record;
 }
@@ -329,7 +354,33 @@ ${logContent.slice(0, 4000)}
     }
 }
 
-// --- Endpoints ---
+// --- OAuth Direct Endpoints ---
+app.get("/api/auth/github", (req, res) => {
+    const redirectUri = `${req.protocol}://${req.get("host")}/api/auth/callback`;
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo%20workflow%20user&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    res.redirect(githubAuthUrl);
+});
+
+app.get("/api/auth/callback", async (req, res) => {
+    const { code } = req.query;
+    try {
+        const tokenRes = await axios.post("https://github.com/login/oauth/access_token", {
+            client_id: GITHUB_CLIENT_ID,
+            client_secret: GITHUB_CLIENT_SECRET,
+            code
+        }, { headers: { Accept: "application/json" } });
+
+        const accessToken = tokenRes.data.access_token;
+        const userRes = await axios.get("https://api.github.com/user", {
+            headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": "DevOps-AI-Log-Analyzer" }
+        });
+
+        const owner = userRes.data.login;
+        res.redirect(`http://localhost:5173/?token=${accessToken}&owner=${owner}`);
+    } catch (err) {
+        res.redirect(`http://localhost:5173/?error=${encodeURIComponent(err.message)}`);
+    }
+});
 
 // Health Check
 app.get("/api/health", (req, res) => {
@@ -339,7 +390,7 @@ app.get("/api/health", (req, res) => {
         message: "DevOps AI Log Analyzer Backend is active 🚀",
         model: PRIMARY_MODEL,
         github_repo: `${owner}/${repo}`,
-        database_connected: !!dbPool,
+        database_connected: !!dbPool || !!supabase,
         timestamp: new Date().toISOString()
     });
 });
@@ -378,7 +429,6 @@ app.get("/github", async (req, res) => {
         const data = await fetchGitHubAPI("/actions/runs?per_page=5", req);
         const rawRuns = data.workflow_runs || [];
 
-        // Auto-analyze runs parallelly
         const runs = await Promise.all(rawRuns.map(async r => {
             let aiAnalysis = null;
             if (r.conclusion === "failure" || r.conclusion === "success") {
@@ -575,6 +625,13 @@ app.get("/logs/:id", async (req, res) => {
 
 // GET /api/incidents: Retrieve persisted incident records
 app.get("/api/incidents", async (req, res) => {
+    if (supabase) {
+        try {
+            const { data } = await supabase.from("incidents").select("*").order("created_at", { ascending: false }).limit(20);
+            if (data && data.length > 0) return res.json({ success: true, count: data.length, incidents: data });
+        } catch (e) {}
+    }
+
     if (dbPool) {
         try {
             const dbRes = await dbPool.query("SELECT * FROM incidents ORDER BY created_at DESC LIMIT 20");

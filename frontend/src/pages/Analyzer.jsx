@@ -25,15 +25,22 @@ import {
     ListFilter,
     Key,
     ChevronDown,
-    ChevronUp
+    ChevronUp,
+    LogOut,
+    Github
 } from "lucide-react";
 import api from "../services/api";
+import { supabase } from "../services/supabase";
 
 function Dashboard() {
-    // Repository & Account Configuration State
+    // Auth State (Supabase / GitHub OAuth)
+    const [session, setSession] = useState(null);
+    const [userProfile, setUserProfile] = useState(null);
+    const [githubToken, setGithubToken] = useState(() => localStorage.getItem("gh_token") || "");
+
+    // Repository State
     const [owner, setOwner] = useState(() => localStorage.getItem("gh_owner") || "AidonPatrao");
     const [repo, setRepo] = useState(() => localStorage.getItem("gh_repo") || "ai-llm-rag-analyzer");
-    const [pat, setPat] = useState(() => localStorage.getItem("gh_pat") || "");
     const [showConfig, setShowConfig] = useState(false);
 
     // Auto-discovered user repositories list
@@ -41,7 +48,7 @@ function Dashboard() {
     const [loadingRepos, setLoadingRepos] = useState(false);
 
     // Navigation state
-    const [activeTab, setActiveTab] = useState("dashboard"); // 'dashboard', 'analyze', 'incidents'
+    const [activeTab, setActiveTab] = useState("dashboard");
     const [file, setFile] = useState(null);
     const [logText, setLogText] = useState("");
     const [inputMode, setInputMode] = useState("file");
@@ -53,10 +60,8 @@ function Dashboard() {
     const [failedBuilds, setFailedBuilds] = useState([]);
     const [incidents, setIncidents] = useState([]);
     
-    // Expanded run cards state for AI analysis details
+    // UI States
     const [expandedRunId, setExpandedRunId] = useState(null);
-
-    // Analysis state (for manual upload tab)
     const [analysisResult, setAnalysisResult] = useState(null);
     const [loadingAnalysis, setLoadingAnalysis] = useState(false);
     const [loadingData, setLoadingData] = useState(true);
@@ -70,9 +75,84 @@ function Dashboard() {
 
     const fileInputRef = useRef(null);
 
+    // Parse URL params for OAuth callback tokens
+    useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get("token");
+        const urlOwner = urlParams.get("owner");
+        if (token) {
+            setGithubToken(token);
+            localStorage.setItem("gh_token", token);
+            if (urlOwner) {
+                setOwner(urlOwner);
+                localStorage.setItem("gh_owner", urlOwner);
+            }
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        // Supabase Auth listener
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            setSession(session);
+            if (session?.provider_token) {
+                setGithubToken(session.provider_token);
+                localStorage.setItem("gh_token", session.provider_token);
+            }
+            if (session?.user) {
+                const username = session.user.user_metadata?.preferred_username || session.user.user_metadata?.user_name || "AidonPatrao";
+                setUserProfile(session.user);
+                setOwner(username);
+                localStorage.setItem("gh_owner", username);
+            }
+        });
+
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setSession(session);
+            if (session?.provider_token) {
+                setGithubToken(session.provider_token);
+                localStorage.setItem("gh_token", session.provider_token);
+            }
+            if (session?.user) {
+                const username = session.user.user_metadata?.preferred_username || session.user.user_metadata?.user_name || "AidonPatrao";
+                setUserProfile(session.user);
+                setOwner(username);
+                localStorage.setItem("gh_owner", username);
+            }
+        });
+
+        return () => subscription.unsubscribe();
+    }, []);
+
+    // GitHub OAuth Login via Supabase Auth
+    const handleGitHubLogin = async () => {
+        try {
+            const { error } = await supabase.auth.signInWithOAuth({
+                provider: "github",
+                options: {
+                    redirectTo: window.location.origin,
+                    scopes: "repo read:org workflow"
+                }
+            });
+            if (error) {
+                // Fallback direct backend OAuth redirect
+                window.location.href = "http://localhost:3000/api/auth/github";
+            }
+        } catch (e) {
+            window.location.href = "http://localhost:3000/api/auth/github";
+        }
+    };
+
+    const handleLogout = async () => {
+        await supabase.auth.signOut();
+        setSession(null);
+        setUserProfile(null);
+        setGithubToken("");
+        localStorage.removeItem("gh_token");
+    };
+
     // Helper for API headers
-    const getHeaders = (overrideOwner = owner, overrideRepo = repo, overridePat = pat) => ({
+    const getHeaders = (overrideOwner = owner, overrideRepo = repo, overridePat = githubToken) => ({
         headers: {
+            "Authorization": overridePat ? `Bearer ${overridePat}` : "",
             "x-github-owner": overrideOwner,
             "x-github-repo": overrideRepo,
             "x-github-pat": overridePat
@@ -98,15 +178,13 @@ function Dashboard() {
         if (showConfig) {
             fetchUserRepositories();
         }
-    }, [showConfig, owner, pat]);
+    }, [showConfig, owner, githubToken]);
 
-    // Save configuration settings
     const selectRepository = (selectedOwner, selectedRepo) => {
         setOwner(selectedOwner);
         setRepo(selectedRepo);
         localStorage.setItem("gh_owner", selectedOwner);
         localStorage.setItem("gh_repo", selectedRepo);
-        localStorage.setItem("gh_pat", pat);
         setShowConfig(false);
     };
 
@@ -137,7 +215,7 @@ function Dashboard() {
 
     useEffect(() => {
         fetchDashboardData();
-    }, [owner, repo, pat]);
+    }, [owner, repo, githubToken]);
 
     // Manual Log Analysis (RAG + Granite LLM)
     const runAIAnalysis = async (customLog = null, runId = "manual") => {
@@ -193,7 +271,7 @@ function Dashboard() {
             const res = await api.get(`/logs/${id}`, getHeaders());
             setLogPreview(res.data.clean_log_preview || "No log content retrieved.");
         } catch (err) {
-            setLogPreview(`Could not load log: ${err.message}. Ensure GitHub PAT token is configured.`);
+            setLogPreview(`Could not load log: ${err.message}. Ensure GitHub OAuth login is active.`);
         } finally {
             setLoadingLog(false);
         }
@@ -230,6 +308,38 @@ function Dashboard() {
         );
     };
 
+    // --- LANDING LOGIN PAGE IF NOT AUTHENTICATED ---
+    if (!session && !githubToken) {
+        return (
+            <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 selection:bg-purple-500 selection:text-white">
+                <div className="max-w-md w-full bg-slate-900/80 border border-slate-800 rounded-3xl p-8 text-center shadow-2xl backdrop-blur-xl animate-in fade-in duration-300">
+                    <div className="w-16 h-16 rounded-2xl bg-purple-900/40 border border-purple-500/30 text-purple-400 flex items-center justify-center mx-auto mb-6 shadow-lg shadow-purple-950/50">
+                        <Activity className="w-8 h-8" />
+                    </div>
+                    <h1 className="text-3xl font-extrabold tracking-tight text-white mb-2">
+                        AI DevOps Assistant
+                    </h1>
+                    <p className="text-sm text-slate-400 mb-8 leading-relaxed">
+                        Automated CI/CD Log Diagnostics, RAG Knowledge Retrieval, and IBM Granite LLM Incident Remediation.
+                    </p>
+
+                    <button
+                        onClick={handleGitHubLogin}
+                        className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-base shadow-xl shadow-purple-950/60 flex items-center justify-center gap-3 transition-all hover:scale-[1.02] active:scale-98"
+                    >
+                        <Github className="w-5 h-5 fill-current" />
+                        <span>Sign in with GitHub</span>
+                    </button>
+
+                    <div className="mt-8 pt-6 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono text-slate-500">
+                        <span>Supabase + GitHub OAuth</span>
+                        <span>PostgreSQL DB Active</span>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-purple-500 selection:text-white">
             {/* Top Navigation Bar */}
@@ -249,38 +359,52 @@ function Dashboard() {
                                     onClick={() => setShowConfig(!showConfig)}
                                     className="text-[10px] text-slate-300 hover:text-white px-2 py-0.5 rounded bg-purple-950/80 border border-purple-500/40 flex items-center gap-1 transition-all"
                                 >
-                                    <ListFilter className="w-3 h-3 text-purple-400" /> Change Repo
+                                    <ListFilter className="w-3 h-3 text-purple-400" /> Select Repo
                                 </button>
                             </div>
                         </div>
                     </div>
 
-                    {/* Navigation Tabs */}
-                    <div className="flex gap-1 p-1 bg-slate-950/80 border border-slate-800 rounded-xl">
-                        <button
-                            onClick={() => setActiveTab("dashboard")}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                                activeTab === "dashboard" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
-                            }`}
-                        >
-                            Automated Pipeline Dashboard
-                        </button>
-                        <button
-                            onClick={() => setActiveTab("analyze")}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                                activeTab === "analyze" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
-                            }`}
-                        >
-                            Custom Log Analyzer
-                        </button>
-                        <button
-                            onClick={() => setActiveTab("incidents")}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                                activeTab === "incidents" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
-                            }`}
-                        >
-                            PostgreSQL Incidents ({incidents.length})
-                        </button>
+                    {/* Right User Profile & Navigation Tabs */}
+                    <div className="flex items-center gap-4">
+                        <div className="flex gap-1 p-1 bg-slate-950/80 border border-slate-800 rounded-xl">
+                            <button
+                                onClick={() => setActiveTab("dashboard")}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                                    activeTab === "dashboard" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
+                                }`}
+                            >
+                                Overview
+                            </button>
+                            <button
+                                onClick={() => setActiveTab("analyze")}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                                    activeTab === "analyze" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
+                                }`}
+                            >
+                                Custom Analyzer
+                            </button>
+                            <button
+                                onClick={() => setActiveTab("incidents")}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                                    activeTab === "incidents" ? "bg-purple-600 text-white shadow-md" : "text-slate-400 hover:text-white"
+                                }`}
+                            >
+                                PostgreSQL Incidents ({incidents.length})
+                            </button>
+                        </div>
+
+                        {/* Profile Avatar / Logout */}
+                        <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
+                            {userProfile?.user_metadata?.avatar_url ? (
+                                <img src={userProfile.user_metadata.avatar_url} alt="Profile" className="w-7 h-7 rounded-full border border-purple-500/40" />
+                            ) : (
+                                <User className="w-5 h-5 text-purple-400" />
+                            )}
+                            <button onClick={handleLogout} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-all" title="Sign Out">
+                                <LogOut className="w-4 h-4" />
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -291,62 +415,17 @@ function Dashboard() {
                             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                                 <div>
                                     <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                                        <FolderGit2 className="w-4 h-4 text-purple-400" /> Select GitHub Account & Repository
+                                        <FolderGit2 className="w-4 h-4 text-purple-400" /> Select GitHub Repository
                                     </h3>
-                                    <p className="text-xs text-slate-400 mt-0.5">Type your GitHub username or token to automatically load all your repositories.</p>
+                                    <p className="text-xs text-slate-400 mt-0.5">Pick any repository from your authenticated GitHub account.</p>
                                 </div>
                                 <button onClick={() => setShowConfig(false)} className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded">Close</button>
                             </div>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
-                                <div>
-                                    <label className="block text-xs font-mono text-slate-400 mb-1 flex items-center gap-1">
-                                        <User className="w-3.5 h-3.5 text-purple-400" /> GitHub Username / Owner
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={owner}
-                                        onChange={(e) => setOwner(e.target.value)}
-                                        placeholder="e.g. AidonPatrao"
-                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="block text-xs font-mono text-slate-400 mb-1 flex items-center gap-1">
-                                        <Key className="w-3.5 h-3.5 text-purple-400" /> GitHub PAT Token (Optional for Private Repos)
-                                    </label>
-                                    <input
-                                        type="password"
-                                        value={pat}
-                                        onChange={(e) => {
-                                            setPat(e.target.value);
-                                            localStorage.setItem("gh_pat", e.target.value);
-                                        }}
-                                        placeholder="ghp_..."
-                                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-purple-500"
-                                    />
-                                </div>
-
-                                <div>
-                                    <button
-                                        onClick={fetchUserRepositories}
-                                        disabled={loadingRepos}
-                                        className="w-full py-1.5 rounded-lg bg-purple-900/50 hover:bg-purple-900 border border-purple-500/40 text-purple-200 font-medium text-xs shadow flex items-center justify-center gap-1.5"
-                                    >
-                                        <RefreshCw className={`w-3.5 h-3.5 ${loadingRepos ? "animate-spin" : ""}`} />
-                                        <span>Fetch Repositories</span>
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Discovered Repository Dropdown / Card List */}
-                            <div className="pt-2">
-                                <label className="block text-xs font-mono text-slate-400 mb-2 flex items-center gap-1">
-                                    <ListFilter className="w-3.5 h-3.5 text-purple-400" /> Choose a Repository:
-                                </label>
+                            {/* Discovered Repository Cards */}
+                            <div>
                                 {loadingRepos ? (
-                                    <p className="text-xs text-slate-400 italic py-2">Loading repositories for {owner}...</p>
+                                    <p className="text-xs text-slate-400 italic py-2">Loading your GitHub repositories...</p>
                                 ) : userRepos.length === 0 ? (
                                     <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-950 p-3 rounded-lg border border-slate-800">
                                         <span>Currently targetting: <strong className="text-purple-300">{owner}/{repo}</strong></span>
@@ -358,7 +437,7 @@ function Dashboard() {
                                         </button>
                                     </div>
                                 ) : (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1">
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1">
                                         {userRepos.map(r => (
                                             <button
                                                 key={r.id}
@@ -704,7 +783,7 @@ function Dashboard() {
                                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                                     <Database className="w-5 h-5 text-indigo-400" /> Persisted Incident History
                                 </h2>
-                                <p className="text-xs text-slate-400 mt-0.5">Stored automatically in PostgreSQL database for compliance & post-mortems.</p>
+                                <p className="text-xs text-slate-400 mt-0.5">Stored automatically in PostgreSQL / Supabase database for compliance & post-mortems.</p>
                             </div>
                         </div>
 
